@@ -1,8 +1,8 @@
 package tubing_cdc
 
-type Options struct {
-	DSN      string
-	UserName string
+type Configs struct {
+	Address  string
+	Username string
 	Password string
 	Tables   []string
 }
