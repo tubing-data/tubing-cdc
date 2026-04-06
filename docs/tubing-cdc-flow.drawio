@@ -1,0 +1,75 @@
+<mxfile host="app.diagrams.net" modified="2026-04-07T00:00:00.000Z" agent="tubing-cdc" version="22.1.0" type="device">
+  <diagram name="tubing-cdc-flow" id="tubing-cdc-flow">
+    <mxGraphModel dx="1100" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="tubing-cdc — runtime data flow" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="260" y="20" width="480" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="n1" value="Application: NewTubingCDC(Configs)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="320" y="70" width="360" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="n2" value="Build go-mysql canal config&#xa;Address / credentials / IncludeTableRegex per db.table" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656" vertex="1" parent="1">
+          <mxGeometry x="300" y="130" width="400" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="n3" value="canal.NewCanal" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656" vertex="1" parent="1">
+          <mxGeometry x="360" y="200" width="280" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="n4" value="Event handler&#xa;• nil → MyEventHandler (log raw rows)&#xa;• optional: PositionPersistence → wrapHandlerWithPositionStore&#xa;  (inner OnPosSynced first, then Badger + Redis)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8" vertex="1" parent="1">
+          <mxGeometry x="260" y="255" width="480" height="88" as="geometry" />
+        </mxCell>
+        <mxCell id="n5" value="river.SetEventHandler(handler)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656" vertex="1" parent="1">
+          <mxGeometry x="310" y="360" width="380" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="n6" value="Run() or RunFrom(mysql.Position) — blocks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="310" y="415" width="380" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="n7" value="MySQL&#xa;binlog stream" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="380" y="480" width="240" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n8" value="go-mysql canal decodes replication events&#xa;→ OnRow, OnTableChanged, OnDDL, OnXID, OnGTID, OnPosSynced, …" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;spacingLeft=8" vertex="1" parent="1">
+          <mxGeometry x="220" y="570" width="560" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="n9" value="Row path (example: DynamicTableEventHandler)&#xa;schema → reflect.StructOf → optional field transform rules → RowEventSink&#xa;(Logger / Stdout / Kafka / custom)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8" vertex="1" parent="1">
+          <mxGeometry x="220" y="645" width="560" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="n10" value="Position path: OnPosSynced after inner succeeds&#xa;→ twoTierPositionStore: write Badger; background Redis SET on interval;&#xa;Close() final Redis flush + shutdown" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8" vertex="1" parent="1">
+          <mxGeometry x="220" y="735" width="560" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1;" edge="1" parent="1" source="n1" target="n2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="n2" target="n3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="n3" target="n4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="n4" target="n5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="n5" target="n6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="n6" target="n7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="n7" target="n8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="1" source="n8" target="n9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;" edge="1" parent="1" source="n8" target="n10">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="800" y="598" />
+              <mxPoint x="800" y="771" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
