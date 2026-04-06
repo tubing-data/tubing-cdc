@@ -15,9 +15,9 @@ import (
 	"github.com/siddontang/go-log/log"
 )
 
-// DynamicTableEventHandler builds a runtime reflect.Type (via reflect.StructOf) for each
-// watched table from canal schema metadata, prints a Go struct snippet once per table, and
-// logs each row event as JSON (update events include before/after pairs).
+// DynamicTableEventHandler maps each watched table's binlog row to map[string]any using canal
+// column order and names (JSON keys match MySQL column names). It prints a Go struct snippet
+// once per table for documentation; runtime rows avoid reflect.StructOf per event.
 type DynamicTableEventHandler struct {
 	canal.DummyEventHandler
 
@@ -27,8 +27,13 @@ type DynamicTableEventHandler struct {
 	fieldRules []RowFieldTransformRule
 
 	mu            sync.Mutex
-	rowStruct     map[string]reflect.Type
+	rowLayout     map[string]rowColumnLayout
 	printedSource map[string]bool
+}
+
+// rowColumnLayout holds per-table JSON field names in column order (aligned with canal row slices).
+type rowColumnLayout struct {
+	jsonKeys []string
 }
 
 // RowFieldTransformRule applies a custom function to one source column (JSON key matches the
@@ -75,7 +80,7 @@ func NewDynamicTableEventHandler(registeredTables []string, opts ...DynamicHandl
 	}
 	h := &DynamicTableEventHandler{
 		allow:         allow,
-		rowStruct:     make(map[string]reflect.Type),
+		rowLayout:     make(map[string]rowColumnLayout),
 		printedSource: make(map[string]bool),
 	}
 	for _, o := range opts {
@@ -94,7 +99,7 @@ func (h *DynamicTableEventHandler) String() string {
 func (h *DynamicTableEventHandler) OnTableChanged(_ *replication.EventHeader, schema, table string) error {
 	key := tableFQN(schema, table)
 	h.mu.Lock()
-	delete(h.rowStruct, key)
+	delete(h.rowLayout, key)
 	delete(h.printedSource, key)
 	h.mu.Unlock()
 	log.Infof("[CDC] table changed, cleared dynamic struct cache: %s", key)
@@ -111,10 +116,10 @@ func (h *DynamicTableEventHandler) OnRow(e *canal.RowsEvent) error {
 	}
 
 	h.mu.Lock()
-	rt, ok := h.rowStruct[key]
+	layout, ok := h.rowLayout[key]
 	if !ok {
-		rt = buildRuntimeRowStructType(e.Table)
-		h.rowStruct[key] = rt
+		layout = rowColumnLayoutFromTable(e.Table)
+		h.rowLayout[key] = layout
 	}
 	if !h.printedSource[key] {
 		h.printedSource[key] = true
@@ -126,13 +131,13 @@ func (h *DynamicTableEventHandler) OnRow(e *canal.RowsEvent) error {
 	case canal.UpdateAction:
 		for i := 0; i+1 < len(e.Rows); i += 2 {
 			h.logRowJSON(key, e.Action, map[string]any{
-				"before": rowValuesToStruct(rt, e.Rows[i]),
-				"after":  rowValuesToStruct(rt, e.Rows[i+1]),
+				"before": rowValuesToMap(layout, e.Rows[i]),
+				"after":  rowValuesToMap(layout, e.Rows[i+1]),
 			})
 		}
 	default:
 		for _, row := range e.Rows {
-			h.logRowJSON(key, e.Action, rowValuesToStruct(rt, row))
+			h.logRowJSON(key, e.Action, rowValuesToMap(layout, row))
 		}
 	}
 	return nil
@@ -191,6 +196,10 @@ func (h *DynamicTableEventHandler) applyFieldRulesToPayload(tableKey, action str
 }
 
 func (h *DynamicTableEventHandler) applyFieldRulesToSingleRow(tableKey, action string, row any) (map[string]any, error) {
+	if m, ok := row.(map[string]any); ok {
+		h.applyFieldRules(tableKey, action, m)
+		return m, nil
+	}
 	m := dynamicRowStructToMap(row)
 	if m == nil {
 		b, err := json.Marshal(row)
@@ -260,31 +269,34 @@ func tableFQN(schemaName, table string) string {
 	return schemaName + "." + table
 }
 
-func buildRuntimeRowStructType(t *schema.Table) reflect.Type {
-	anyType := reflect.TypeOf((*any)(nil)).Elem()
-	names := uniqueExportedFieldNames(t.Columns)
-	fields := make([]reflect.StructField, len(names))
-	for i, name := range names {
-		tag := fmt.Sprintf(`mysql:"%s" json:"%s"`, t.Columns[i].Name, jsonNameFromColumn(t.Columns[i].Name))
-		fields[i] = reflect.StructField{
-			Name: name,
-			Type: anyType,
-			Tag:  reflect.StructTag(tag),
-		}
+func rowColumnLayoutFromTable(t *schema.Table) rowColumnLayout {
+	if t == nil || len(t.Columns) == 0 {
+		return rowColumnLayout{}
 	}
-	return reflect.StructOf(fields)
+	keys := make([]string, len(t.Columns))
+	for i, c := range t.Columns {
+		keys[i] = jsonNameFromColumn(c.Name)
+	}
+	return rowColumnLayout{jsonKeys: keys}
 }
 
-func rowValuesToStruct(rt reflect.Type, vals []interface{}) any {
-	v := reflect.New(rt).Elem()
-	n := rt.NumField()
-	for i := 0; i < n && i < len(vals); i++ {
-		if vals[i] == nil {
-			continue
-		}
-		v.Field(i).Set(reflect.ValueOf(vals[i]))
+// rowValuesToMap builds one JSON object per binlog row without reflection. Keys match
+// jsonNameFromColumn(c.Name); nil cells and missing trailing values become JSON null like the
+// previous reflect.StructOf + any-field representation.
+func rowValuesToMap(layout rowColumnLayout, vals []interface{}) map[string]any {
+	n := len(layout.jsonKeys)
+	if n == 0 {
+		return map[string]any{}
 	}
-	return v.Interface()
+	out := make(map[string]any, n)
+	for i := 0; i < n; i++ {
+		var v any
+		if i < len(vals) {
+			v = vals[i]
+		}
+		out[layout.jsonKeys[i]] = v
+	}
+	return out
 }
 
 func jsonNameFromColumn(col string) string {

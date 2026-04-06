@@ -110,7 +110,7 @@ func TestGenerateStructGoSource(t *testing.T) {
 	}
 }
 
-func TestBuildRuntimeRowStructType_roundTripJSON(t *testing.T) {
+func TestRowValuesToMap_roundTripJSON(t *testing.T) {
 	tbl := &schema.Table{
 		Schema: "db",
 		Name:   "t",
@@ -119,15 +119,46 @@ func TestBuildRuntimeRowStructType_roundTripJSON(t *testing.T) {
 			{Name: "label", Type: schema.TYPE_STRING},
 		},
 	}
-	rt := buildRuntimeRowStructType(tbl)
-	row := rowValuesToStruct(rt, []interface{}{int64(7), "x"})
-	b, err := json.Marshal(row)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+	layout := rowColumnLayoutFromTable(tbl)
+	tests := []struct {
+		name     string
+		vals     []interface{}
+		wantJSON string
+	}{
+		{
+			name:     "two values",
+			vals:     []interface{}{int64(7), "x"},
+			wantJSON: `{"id":7,"label":"x"}`,
+		},
+		{
+			name:     "nil cell",
+			vals:     []interface{}{int64(1), nil},
+			wantJSON: `{"id":1,"label":null}`,
+		},
+		{
+			name:     "short vals trailing null",
+			vals:     []interface{}{int64(1)},
+			wantJSON: `{"id":1,"label":null}`,
+		},
 	}
-	const want = `{"id":7,"label":"x"}`
-	if string(b) != want {
-		t.Fatalf("got %s want %s", b, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := rowValuesToMap(layout, tt.vals)
+			b, err := json.Marshal(row)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var gotObj, wantObj any
+			if err := json.Unmarshal(b, &gotObj); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tt.wantJSON), &wantObj); err != nil {
+				t.Fatal(err)
+			}
+			if !jsonEqual(gotObj, wantObj) {
+				t.Fatalf("got %s want %s", string(b), tt.wantJSON)
+			}
+		})
 	}
 }
 
@@ -175,26 +206,26 @@ func (s *sliceRowSink) Emit(tableKey, action string, payloadJSON []byte) error {
 	return nil
 }
 
+type testTaggedRow struct {
+	Id   int64  `json:"id"`
+	Meta string `json:"meta"`
+}
+
 func TestDynamicRowStructToMap(t *testing.T) {
-	tbl := &schema.Table{
-		Schema: "db",
-		Name:   "t",
-		Columns: []schema.TableColumn{
-			{Name: "id", Type: schema.TYPE_NUMBER},
-			{Name: "meta", Type: schema.TYPE_STRING},
-		},
-	}
-	rt := buildRuntimeRowStructType(tbl)
-	row := rowValuesToStruct(rt, []interface{}{int64(1), "x"})
 	tests := []struct {
 		name string
 		in   any
 		want map[string]any
 	}{
 		{
-			name: "dynamic row struct",
-			in:   row,
+			name: "struct with json tags",
+			in:   testTaggedRow{Id: 1, Meta: "x"},
 			want: map[string]any{"id": int64(1), "meta": "x"},
+		},
+		{
+			name: "map passes through applyFieldRules fast path only",
+			in:   map[string]any{"id": int64(1)},
+			want: nil,
 		},
 		{name: "nil", in: nil, want: nil},
 		{name: "not struct", in: 42, want: nil},

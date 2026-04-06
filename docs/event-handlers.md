@@ -9,7 +9,7 @@
 
 Pass the same `[]string` you use for `Configs.Tables` so only registered tables are processed, or pass `nil`/empty to allow every table that appears in events.
 
-Implementation: `cdc_event_handler.go`, `cdc_dynamic_event_handler.go`, `row_event_sink.go`, `kafka_row_sink.go`.
+Implementation: `cdc_event_handler.go`, `cdc_dynamic_event_handler.go`, `row_event_sink.go`, `kafka_row_sink.go`, `elasticsearch_row_sink.go`, `elasticsearch_document_id.go`.
 
 ## Row output sinks (`RowEventSink`)
 
@@ -20,6 +20,7 @@ By default, row JSON goes to **`LoggerRowSink`** (same `[CDC] action table …` 
 | **`LoggerRowSink`** | Default when no option is passed; uses structured log lines. |
 | **`StdoutRowSink`** | Writes one line per event to an `io.Writer` (defaults to `os.Stdout`). Optional: set `Writer` to a file or buffer. |
 | **`KafkaRowEventSink`** | Publishes each event to Kafka (`segmentio/kafka-go`): message **key** = fully qualified table name, **value** = JSON payload, header **`cdc_action`** = canal action. Call **`Close()`** on shutdown. |
+| **`ElasticsearchRowEventSink`** | Indexes each row via the Elasticsearch HTTP API (`PUT`/`POST`/`DELETE` …`/_doc`). Configure cluster **`Addresses`** (first entry is used), **`Index`** or **`IndexResolver`**, optional **`DocumentID`** (see **`JoinElasticsearchDocumentID`**), **`Refresh`**, **`Username`**/**`Password`**, or **`APIKey`**. For a local cluster, run **`docker compose up -d elasticsearch`** (see [development.md](development.md)). |
 
 Implement **`RowEventSink`** yourself (`Emit(tableKey, action string, payloadJSON []byte) error`) for other systems (HTTP, Pulsar, etc.).
 
@@ -56,6 +57,21 @@ if err != nil {
 defer ks.Close()
 
 h := tubingcdc.NewDynamicTableEventHandler(tables, tubingcdc.WithRowEventSink(ks))
+cfg := &tubingcdc.Configs{ /* … */, EventHandler: h }
+```
+
+Elasticsearch (local Compose endpoint):
+
+```go
+es, err := tubingcdc.NewElasticsearchRowEventSink(tubingcdc.ElasticsearchSinkConfig{
+    Addresses: []string{"http://localhost:9200"},
+    Index:     "cdc_rows",
+})
+if err != nil {
+    // handle error
+}
+
+h := tubingcdc.NewDynamicTableEventHandler(tables, tubingcdc.WithRowEventSink(es))
 cfg := &tubingcdc.Configs{ /* … */, EventHandler: h }
 ```
 

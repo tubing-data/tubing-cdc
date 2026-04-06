@@ -33,7 +33,7 @@ type Configs struct {
 	Tables []string
 	// EventHandler is optional; when nil, MyEventHandler is used.
 	// Use NewDynamicTableEventHandler(Tables, tubingcdc.WithRowEventSink(...)) to emit each row as JSON;
-	// default sink is LoggerRowSink; use StdoutRowSink or KafkaRowEventSink for other destinations.
+	// default sink is LoggerRowSink; use StdoutRowSink, KafkaRowEventSink, or ElasticsearchRowEventSink for other destinations.
 	EventHandler canal.EventHandler
 	// PositionPersistence is optional; when non-nil and BadgerDir is set, each OnPosSynced updates Badger
 	// and optionally mirrors to Redis on a timer. Close the TubingCDC on shutdown to flush Redis and release Badger.
