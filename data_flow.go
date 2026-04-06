@@ -10,7 +10,8 @@ import (
 )
 
 type TubingCDC struct {
-	river *canal.Canal
+	river    *canal.Canal
+	posStore *twoTierPositionStore
 }
 
 func NewTubingCDC(cfg *Configs) (*TubingCDC, error) {
@@ -39,9 +40,20 @@ func NewTubingCDC(cfg *Configs) (*TubingCDC, error) {
 	if handler == nil {
 		handler = &MyEventHandler{}
 	}
+
+	var posStore *twoTierPositionStore
+	if cfg.PositionPersistence != nil && cfg.PositionPersistence.BadgerDir != "" {
+		var perr error
+		posStore, perr = newTwoTierPositionStore(cfg.PositionPersistence)
+		if perr != nil {
+			river.Close()
+			return nil, perr
+		}
+		handler = wrapHandlerWithPositionStore(handler, posStore)
+	}
 	river.SetEventHandler(handler)
 
-	return &TubingCDC{river: river}, nil
+	return &TubingCDC{river: river, posStore: posStore}, nil
 }
 
 func tableIncludeRegex(dbTable string) (string, error) {
@@ -61,5 +73,9 @@ func (t *TubingCDC) RunFrom(pos mysql.Position) error {
 }
 
 func (t *TubingCDC) Close() {
+	if t.posStore != nil {
+		_ = t.posStore.Close()
+		t.posStore = nil
+	}
 	t.river.Close()
 }
