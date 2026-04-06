@@ -32,4 +32,12 @@ if err := cdc.Run(); err != nil {
 }
 ```
 
-Use `RunFrom(mysql.Position)` to resume from a stored position. More detail: [docs/usage.md](docs/usage.md). Persistence: [docs/position-persistence.md](docs/position-persistence.md). Handlers and sinks: [docs/event-handlers.md](docs/event-handlers.md). Runtime diagram: [docs/architecture.md](docs/architecture.md). Tests: [docs/development.md](docs/development.md). Roadmap: [docs/roadmap.md](docs/roadmap.md). Citation: [docs/references.md](docs/references.md).
+Use `RunFrom(mysql.Position)` to resume from a stored binlog position.
+
+- **Usage:** [docs/usage.md](docs/usage.md)
+- **Position persistence:** [docs/position-persistence.md](docs/position-persistence.md)
+- **Handlers & sinks:** [docs/event-handlers.md](docs/event-handlers.md)
+- **Runtime diagram:** [docs/architecture.md](docs/architecture.md)
+- **Tests & development:** [docs/development.md](docs/development.md)
+- **Roadmap:** [docs/roadmap.md](docs/roadmap.md)
+- **Citation:** [docs/references.md](docs/references.md)
