@@ -1,20 +1,15 @@
 # tubing-cdc
 
-When I joined the second company in my career, I was assigned to build a CDC system. At that time, I realized that when the amount of data in the enterprise was gradually increasing, such a system was needed to handle data synchronization related work, but before that, we needed a lightweight solution. This project aims to design a lightweight, out-of-the-box system to help the booming system quickly establish a data synchronization module.
+Lightweight MySQL **binlog** CDC on [go-mysql canal](https://github.com/go-mysql-org/go-mysql): a small `TubingCDC` API, optional binlog **position persistence** (Badger + Redis), and pluggable handlers and sinks. The long-term target is alignment with the **DBLog** paper (watermarks and chunked snapshots); today the implementation is **binlog-only** phase 1.
 
-It wraps [go-mysql canal](https://github.com/go-mysql-org/go-mysql) for MySQL binlog consumption and exposes a small `TubingCDC` API plus pluggable event handlers.
+- **Human narrative + goals:** [docs/context.md](docs/context.md)
+- **Paper vs code:** [docs/coverage-vs-dblog.md](docs/coverage-vs-dblog.md)
+- **Agent / AI map:** [AGENTS.md](AGENTS.md)
+- **Full doc index:** [docs/context.md](docs/context.md#related-docs)
 
-## Architecture (runtime flow)
+## Quick start
 
-The diagram below summarizes how configuration becomes a live binlog consumer, how events reach your handler (including optional dynamic row handling and sinks), and how position persistence layers on `OnPosSynced`.
-
-![tubing-cdc runtime flow](docs/tubing-cdc-flow.png)
-
-Editable source: [docs/tubing-cdc-flow.drawio](docs/tubing-cdc-flow.drawio) (open in [draw.io](https://app.diagrams.net/) or the desktop app). To regenerate the PNG after editing, use the draw.io desktop CLI, for example: `draw.io -x -f png -o docs/tubing-cdc-flow.png docs/tubing-cdc-flow.drawio` (the `draw.io` binary path depends on your OS install).
-
-## Usage
-
-Create a client with `Configs`. Table names must be fully qualified as `database.table`; each entry is turned into an include regex for canal.
+Table names must be fully qualified as `database.table`.
 
 ```go
 import tubingcdc "tubing-cdc"
@@ -32,155 +27,9 @@ if err != nil {
 }
 defer cdc.Close()
 
-// Block and follow the binlog from the current position.
 if err := cdc.Run(); err != nil {
     // handle error
 }
 ```
 
-To start from a known binlog position, use `RunFrom(mysql.Position)` instead of `Run()`.
-
-## Binlog position persistence (Badger + Redis)
-
-To avoid reprocessing events after restarts and to support recovery, you can persist the sync position in two tiers:
-
-1. **Badger (local)** — After each successful canal **`OnPosSynced`** callback (for example when a transaction commits via `XIDEvent`, and likewise for rotate/DDL when canal chooses to save), the latest **`mysql.Position`** plus an optional **GTID** string are written to a local Badger database.
-2. **Redis (periodic)** — If `RedisAddr` is set, a background goroutine **SET**s the same JSON snapshot on a configurable interval (**default 5 minutes** when `FlushToRedisInterval` is zero). **`TubingCDC.Close()`** stops that loop, performs a **final Redis write**, then closes Badger and the Redis client—so always call **`Close()`** on shutdown.
-
-Enable this by setting **`Configs.PositionPersistence`** with a non-empty **`BadgerDir`**. The user `EventHandler` is wrapped automatically; your `OnPosSynced` (if overridden) still runs first, and persistence runs only when it returns no error.
-
-| Field | Role |
-|--------|------|
-| **`BadgerDir`** | Directory for Badger (required to enable). |
-| **`BadgerKey`** | Key inside Badger; empty uses a built-in default. |
-| **`RedisAddr`** | If empty, only Badger is used (no Redis goroutine). |
-| **`RedisPassword`**, **`RedisDB`** | Standard Redis client options. |
-| **`RedisKey`** | Redis key for the JSON value; empty uses a built-in default. |
-| **`FlushToRedisInterval`** | Interval between Redis writes; **default 5m** if unset or non-positive. |
-| **`GTIDFlavor`** | Stored in JSON (e.g. `mysql`, `mariadb`) to help operators parse GTID on recovery. |
-
-Example:
-
-```go
-import (
-    "time"
-
-    tubingcdc "tubing-cdc"
-)
-
-cfg := &tubingcdc.Configs{
-    Address:  "127.0.0.1:3306",
-    Username: "cdc_user",
-    Password: "secret",
-    Tables:   []string{"mydb.orders"},
-    PositionPersistence: &tubingcdc.PositionPersistence{
-        BadgerDir:             "/var/lib/tubing-cdc/positions",
-        RedisAddr:             "127.0.0.1:6379",
-        RedisKey:              "myapp:cdc:binlog-position",
-        FlushToRedisInterval:  5 * time.Minute,
-        GTIDFlavor:            "mysql",
-    },
-}
-```
-
-The stored JSON shape is **`tubingcdc.BinlogStateRecord`** (`file`, `pos`, optional `gtid`, `gtid_flavor`). To read the last position from disk without opening the live process (for example to call **`RunFrom`** on startup), use **`tubingcdc.ReadBinlogStateFromBadger(badgerDir, badgerKey)`**; it returns **`mysql.Position`** and a GTID string you can pass to **`mysql.ParseGTIDSet`** together with your chosen flavor.
-
-## Event handlers
-
-- **Default (`MyEventHandler`)** — If `Configs.EventHandler` is nil, row events are logged as raw action plus row slices (simple debugging).
-- **`DynamicTableEventHandler`** — Call `tubingcdc.NewDynamicTableEventHandler(tables, opts...)` and assign it to `Configs.EventHandler`. For each watched table, the handler:
-  - Builds a **runtime struct type** with `reflect.StructOf` from canal’s table schema (fields are `any` so binlog values fit reliably).
-  - Logs a **Go struct snippet** once per table (approximate field types for readability).
-  - Emits **each row event as JSON** through a pluggable **`RowEventSink`**; `update` events include `before` and `after` objects.
-  - Optionally applies **destination field transforms** (`WithRowFieldTransformRules`) so you can derive or reshape columns before JSON reaches the sink.
-
-Pass the same `[]string` you use for `Configs.Tables` so only registered tables are processed, or pass `nil`/empty to allow every table that appears in events.
-
-### Row output sinks (`RowEventSink`)
-
-By default, row JSON goes to **`LoggerRowSink`** (same `[CDC] action table …` lines as before via `go-log`). You can redirect output with **`tubingcdc.WithRowEventSink`**:
-
-| Sink | Role |
-|------|------|
-| **`LoggerRowSink`** | Default when no option is passed; uses structured log lines. |
-| **`StdoutRowSink`** | Writes one line per event to an `io.Writer` (defaults to `os.Stdout`). Optional: set `Writer` to a file or buffer. |
-| **`KafkaRowEventSink`** | Publishes each event to Kafka (`segmentio/kafka-go`): message **key** = fully qualified table name, **value** = JSON payload, header **`cdc_action`** = canal action. Call **`Close()`** on shutdown. |
-
-Implement **`RowEventSink`** yourself (`Emit(tableKey, action string, payloadJSON []byte) error`) for other systems (HTTP, Pulsar, etc.).
-
-Default handler (log sink):
-
-```go
-tables := []string{"mydb.orders"}
-cfg := &tubingcdc.Configs{
-    Address:      "127.0.0.1:3306",
-    Username:     "cdc_user",
-    Password:     "secret",
-    Tables:       tables,
-    EventHandler: tubingcdc.NewDynamicTableEventHandler(tables),
-}
-```
-
-Stdout (line-oriented, same prefix as logs):
-
-```go
-h := tubingcdc.NewDynamicTableEventHandler(tables, tubingcdc.WithRowEventSink(tubingcdc.StdoutRowSink{}))
-// Or: StdoutRowSink{Writer: fileOrPipe}
-```
-
-Kafka:
-
-```go
-ks, err := tubingcdc.NewKafkaRowEventSink(tubingcdc.KafkaSinkConfig{
-    Brokers: []string{"localhost:9092"},
-    Topic:   "cdc_rows",
-})
-if err != nil {
-    // handle error
-}
-defer ks.Close()
-
-h := tubingcdc.NewDynamicTableEventHandler(tables, tubingcdc.WithRowEventSink(ks))
-cfg := &tubingcdc.Configs{ /* … */, EventHandler: h }
-```
-
-### Destination field transforms (`WithRowFieldTransformRules`)
-
-Before a row is serialized for `RowEventSink`, you can register one or more **`RowFieldTransformRule`** values. Each rule watches a **source column** (the JSON field name is the same as the MySQL column name in the default mapping) and runs a **`Transform` function** that returns a `map[string]any`. That map is **merged into the outgoing row**: new keys are added, and **if a returned key already exists on the row, it is overwritten**. When several rules run, **later rules win** on the same output key.
-
-- **`TableKey`** — If set to a fully qualified name like `mydb.orders`, the rule runs only for that table. If empty, the rule applies to every table the handler processes.
-- **`SourceColumn`** — Must match an existing key on the row after the base mapping; if the column is absent, the rule is skipped.
-- **`Transform(tableKey, action, value)`** — Receives the current cell value; return any nested structure (maps, slices, etc.) as values in the map.
-
-`update` events apply the same rules independently to **`before`** and **`after`**. If you pass **no** transform rules, the handler keeps the previous behavior and marshals the runtime struct directly (no extra map pass).
-
-Example: add a parsed object from a string column and optionally replace the original field.
-
-```go
-h := tubingcdc.NewDynamicTableEventHandler(tables,
-    tubingcdc.WithRowEventSink(sink),
-    tubingcdc.WithRowFieldTransformRules(
-        tubingcdc.RowFieldTransformRule{
-            TableKey:     "mydb.orders",
-            SourceColumn: "payload_json",
-            Transform: func(tableKey, action string, value any) map[string]any {
-                // Example: attach structured output; same key overwrites the row.
-                return map[string]any{
-                    "payload": map[string]any{"raw": value},
-                }
-            },
-        },
-    ),
-)
-```
-
-On DDL, canal calls `OnTableChanged`; the dynamic handler clears its per-table cache so the next rows use an updated layout.
-
-## Local testing
-
-- **Docker Compose** — `docker-compose.yml` starts MySQL (with build context under `docker/mysql/`) on port `3306` for manual CDC experiments.
-- **Go tests** — Integration-style tests (e.g. `TestCDC_dem_test_row_events_integration`) use Testcontainers when Docker is available; table-driven unit tests cover config helpers and the dynamic handler.
-
-## Todo
-
-- Expand docker-based workflows so the full CDC path is easy to run end-to-end in CI or locally.
+Use `RunFrom(mysql.Position)` to resume from a stored position. More detail: [docs/usage.md](docs/usage.md). Persistence: [docs/position-persistence.md](docs/position-persistence.md). Handlers and sinks: [docs/event-handlers.md](docs/event-handlers.md). Runtime diagram: [docs/architecture.md](docs/architecture.md). Tests: [docs/development.md](docs/development.md). Roadmap: [docs/roadmap.md](docs/roadmap.md). Citation: [docs/references.md](docs/references.md).
