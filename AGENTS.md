@@ -17,6 +17,7 @@ Long-term direction: align with the **DBLog** paper (watermarks, chunked PK snap
 | Dynamic struct + JSON + transforms | `cdc_dynamic_event_handler.go` |
 | Sinks (stdout, logger, interface) | `row_event_sink.go` |
 | Kafka sink | `kafka_row_sink.go` |
+| Elasticsearch sink + composable document id | `elasticsearch_row_sink.go`, `elasticsearch_document_id.go` |
 | Badger/Redis position JSON + read helper | `position_store.go` |
 | Wrap handler for `OnPosSynced` persistence | `position_handler_wrapper.go` |
 | Shared small types | `model.go` |
