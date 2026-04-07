@@ -8,10 +8,10 @@ DBLog combines (1) ordered row events from the database transaction log, (2) **c
 | Output ordering / sink pipeline | In-memory buffer + ordered writer | Handler and `RowEventSink` (e.g. log, stdout, Kafka) |
 | Binlog position persistence for restarts | State store (ZK) | Badger + optional Redis (`PositionPersistence`) |
 | Full-state via chunked PK `SELECT` | Yes | No |
-| Watermark table + low/high window + PK reconciliation | Yes (Algorithm 1) | No |
+| Watermark table + low/high window + PK reconciliation | Yes (Algorithm 1) | Watermark table DDL + binlog row parsing/notifier (P1); no Algorithm 1 window yet |
 | Same envelope for log vs snapshot rows | Yes | No (canal-oriented JSON today) |
 | Chunk progress, pause/resume, API triggers | Yes | No |
-| Active/passive HA | Yes | No |
+| Active/passive HA | Yes | Redis leader lease + standby retry (`RunTubingCDCWithLeaderElection`); not full ZK-style cluster metadata |
 | Multi-DB (e.g. PostgreSQL) | Discussed | No (MySQL only) |
 | Canal `mysqldump` dump path | N/A | Disabled (`Dump.ExecutionPath == ""` in `data_flow.go`) |
 

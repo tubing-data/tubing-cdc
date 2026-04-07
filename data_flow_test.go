@@ -1,6 +1,9 @@
 package tubing_cdc
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestTableIncludeRegex(t *testing.T) {
 	tests := []struct {
@@ -32,5 +35,80 @@ func TestTableIncludeRegex(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewTubingCDC_chunkProgressInvalidConfig(t *testing.T) {
+	_, err := NewTubingCDC(&Configs{
+		Address:                  "127.0.0.1:3306",
+		ChunkProgressPersistence: &ChunkProgressPersistence{BadgerDir: ""},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty chunk BadgerDir")
+	}
+	if !strings.Contains(err.Error(), "BadgerDir") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewTubingCDC_positionPersistenceEmptyBadgerDir(t *testing.T) {
+	_, err := NewTubingCDC(&Configs{
+		Address:               "127.0.0.1:3306",
+		PositionPersistence:   &PositionPersistence{BadgerDir: ""},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty position BadgerDir")
+	}
+	if !strings.Contains(err.Error(), "BadgerDir") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestTubingCDC_P4EnqueueAndAccessors(t *testing.T) {
+	q := NewFullStateJobQueue()
+	ctrl := NewChunkProcessingControl()
+	cdc := &TubingCDC{fullStateQ: q, chunkControl: ctrl}
+	if cdc.FullStateJobQueue() != q {
+		t.Fatal("FullStateJobQueue accessor mismatch")
+	}
+	if cdc.ChunkProcessingControl() != ctrl {
+		t.Fatal("ChunkProcessingControl accessor mismatch")
+	}
+	cfg := &FullStateCaptureConfig{
+		Tables: []FullStateTableSpec{{TableKey: "db.t", PKColumns: []string{"id"}, ChunkSize: 5}},
+	}
+	n, err := cdc.EnqueueFullStateJobs(cfg, PlanFullStateJobsOptions{Mode: PlanFullStateAllTables})
+	if err != nil || n != 1 {
+		t.Fatalf("EnqueueFullStateJobs: n=%d err=%v", n, err)
+	}
+	j, ok := q.TryDequeue()
+	if !ok || j.Spec.TableKey != "db.t" {
+		t.Fatalf("dequeue: %+v ok=%v", j, ok)
+	}
+}
+
+func TestTubingCDC_EnqueueFullStateJobsNoQueue(t *testing.T) {
+	cdc := &TubingCDC{}
+	_, err := cdc.EnqueueFullStateJobs(&FullStateCaptureConfig{
+		Tables: []FullStateTableSpec{{TableKey: "db.t", PKColumns: []string{"id"}, ChunkSize: 1}},
+	}, PlanFullStateJobsOptions{Mode: PlanFullStateAllTables})
+	if err == nil {
+		t.Fatal("expected error without queue")
+	}
+	if !strings.Contains(err.Error(), "FullStateJobQueue") {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func TestTubingCDC_EnqueueFullStateJobs_nilReceiver(t *testing.T) {
+	var cdc *TubingCDC
+	_, err := cdc.EnqueueFullStateJobs(&FullStateCaptureConfig{
+		Tables: []FullStateTableSpec{{TableKey: "db.t", PKColumns: []string{"id"}, ChunkSize: 1}},
+	}, PlanFullStateJobsOptions{Mode: PlanFullStateAllTables})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "nil") {
+		t.Fatalf("unexpected: %v", err)
 	}
 }

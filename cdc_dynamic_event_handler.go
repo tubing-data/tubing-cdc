@@ -24,6 +24,9 @@ type DynamicTableEventHandler struct {
 	allow map[string]struct{}
 	sink  RowEventSink
 
+	// useEnvelope wraps each row JSON in CDCEventEnvelope (P0 DBLog-aligned shape).
+	useEnvelope bool
+
 	fieldRules []RowFieldTransformRule
 
 	mu            sync.Mutex
@@ -53,6 +56,15 @@ type DynamicHandlerOption func(*DynamicTableEventHandler)
 func WithRowEventSink(s RowEventSink) DynamicHandlerOption {
 	return func(h *DynamicTableEventHandler) {
 		h.sink = s
+	}
+}
+
+// WithDBLogEnvelope enables the unified CDC event envelope (schema_version, origin, action,
+// table, primary_key, position, payload). Payload remains the legacy JSON row shape so existing
+// RowEventSink implementations keep working; consumers can branch on schema_version.
+func WithDBLogEnvelope(enable bool) DynamicHandlerOption {
+	return func(h *DynamicTableEventHandler) {
+		h.useEnvelope = enable
 	}
 }
 
@@ -130,14 +142,14 @@ func (h *DynamicTableEventHandler) OnRow(e *canal.RowsEvent) error {
 	switch e.Action {
 	case canal.UpdateAction:
 		for i := 0; i+1 < len(e.Rows); i += 2 {
-			h.logRowJSON(key, e.Action, map[string]any{
+			h.logRowJSON(key, e.Action, e.Table, e, map[string]any{
 				"before": rowValuesToMap(layout, e.Rows[i]),
 				"after":  rowValuesToMap(layout, e.Rows[i+1]),
 			})
 		}
 	default:
 		for _, row := range e.Rows {
-			h.logRowJSON(key, e.Action, rowValuesToMap(layout, row))
+			h.logRowJSON(key, e.Action, e.Table, e, rowValuesToMap(layout, row))
 		}
 	}
 	return nil
@@ -151,7 +163,8 @@ func (h *DynamicTableEventHandler) allows(key string) bool {
 	return ok
 }
 
-func (h *DynamicTableEventHandler) logRowJSON(tableKey, action string, payload any) {
+func (h *DynamicTableEventHandler) logRowJSON(tableKey, action string, tbl *schema.Table, ev *canal.RowsEvent, payload any) {
+	resolved := payload
 	var b []byte
 	var err error
 	if len(h.fieldRules) == 0 {
@@ -162,11 +175,24 @@ func (h *DynamicTableEventHandler) logRowJSON(tableKey, action string, payload a
 			log.Infof("[CDC] %s %s field transform error: %v payload=%#v", action, tableKey, prepErr, payload)
 			return
 		}
+		resolved = out
 		b, err = json.Marshal(out)
 	}
 	if err != nil {
 		log.Infof("[CDC] %s %s marshal error: %v payload=%#v", action, tableKey, err, payload)
 		return
+	}
+	if h.useEnvelope {
+		var hdr *replication.EventHeader
+		if ev != nil {
+			hdr = ev.Header
+		}
+		wrapped, werr := MarshalCDCEventEnvelope(DefaultEnvelopeSchemaVersion, OriginLog, action, tableKey, tbl, resolved, b, nil, hdr)
+		if werr != nil {
+			log.Infof("[CDC] %s %s envelope error: %v", action, tableKey, werr)
+			return
+		}
+		b = wrapped
 	}
 	if h.sink == nil {
 		h.sink = LoggerRowSink{}
