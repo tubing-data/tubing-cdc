@@ -199,6 +199,9 @@ func (t *TubingCDC) Canal() *canal.Canal {
 
 func (t *TubingCDC) Close() {
 	t.StopAlgorithm1ChunkDriver()
+	// Close canal while position/chunk Badger stores are still open: canal.Close may invoke
+	// OnPosSynced on the handler chain, which must not run against a nil or closed Badger DB.
+	t.river.Close()
 	if t.posStore != nil {
 		_ = t.posStore.Close()
 		t.posStore = nil
@@ -211,7 +214,6 @@ func (t *TubingCDC) Close() {
 		_ = t.sharedBadger.Close()
 		t.sharedBadger = nil
 	}
-	t.river.Close()
 }
 
 // ChunkProgressStore returns the P2 chunk cursor store when Configs.ChunkProgressPersistence was set, or nil.

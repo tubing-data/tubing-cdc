@@ -2,6 +2,7 @@ package tubing_cdc
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -194,6 +195,89 @@ func TestEmitSnapshotRow(t *testing.T) {
 				t.Fatalf("payload %s missing %q", s.payloads[0], tt.checkSubstr)
 			}
 		})
+	}
+}
+
+func TestEmitSnapshotRow_envelopePrimaryKeyContract(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		tableKey       string
+		row            map[string]any
+		wantPKLen      int
+		wantDatabase   string
+		wantTable      string
+		wantOriginSnap bool
+	}{
+		{
+			name:           "nil_schema_snapshot_has_empty_primary_key_object",
+			tableKey:       "app.users",
+			row:            map[string]any{"id": float64(42), "name": "x"},
+			wantPKLen:      0,
+			wantDatabase:   "app",
+			wantTable:      "users",
+			wantOriginSnap: true,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var s sliceSink
+			if err := emitSnapshotRow(&s, tt.tableKey, true, tt.row); err != nil {
+				t.Fatal(err)
+			}
+			if len(s.payloads) != 1 {
+				t.Fatalf("got %d payloads", len(s.payloads))
+			}
+			var env struct {
+				Origin     string          `json:"origin"`
+				Table      map[string]any  `json:"table"`
+				PrimaryKey map[string]any  `json:"primary_key"`
+				SchemaVer  string          `json:"schema_version"`
+				Action     string          `json:"action"`
+				Payload    json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal(s.payloads[0], &env); err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantOriginSnap && env.Origin != "snapshot" {
+				t.Fatalf("origin=%q", env.Origin)
+			}
+			if env.Table["database"] != tt.wantDatabase || env.Table["table"] != tt.wantTable {
+				t.Fatalf("table=%v", env.Table)
+			}
+			if len(env.PrimaryKey) != tt.wantPKLen {
+				t.Fatalf("primary_key len=%d want %d (contract: no schema.Table in driver path)", len(env.PrimaryKey), tt.wantPKLen)
+			}
+		})
+	}
+}
+
+func TestAlgorithm1DriverErrorPolicy_documentation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		p        Algorithm1DriverErrorPolicy
+		wantZero bool
+	}{
+		{name: "stop_on_error_default_zero", p: Algorithm1DriverStopOnError, wantZero: true},
+		{name: "continue_on_error_nonzero", p: Algorithm1DriverContinueOnError, wantZero: false},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if tt.wantZero && tt.p != 0 {
+				t.Fatalf("want zero default, got %d", tt.p)
+			}
+			if !tt.wantZero && tt.p == 0 {
+				t.Fatal("want non-zero policy value")
+			}
+		})
+	}
+	if Algorithm1DriverContinueOnError == Algorithm1DriverStopOnError {
+		t.Fatal("policies must differ")
 	}
 }
 
