@@ -29,6 +29,7 @@ type BinlogStateRecord struct {
 
 type twoTierPositionStore struct {
 	db        *badger.DB
+	ownDB     bool
 	rdb       *redis.Client
 	redisKey  string
 	badgerKey []byte
@@ -44,16 +45,39 @@ type twoTierPositionStore struct {
 	wg     sync.WaitGroup
 }
 
+func openBadgerDB(dir string) (*badger.DB, error) {
+	bopts := badger.DefaultOptions(dir)
+	bopts.Logger = nil
+	db, err := badger.Open(bopts)
+	if err != nil {
+		return nil, fmt.Errorf("open badger: %w", err)
+	}
+	return db, nil
+}
+
 func newTwoTierPositionStore(cfg *PositionPersistence) (*twoTierPositionStore, error) {
 	if cfg == nil || cfg.BadgerDir == "" {
 		return nil, fmt.Errorf("position persistence requires non-nil PositionPersistence and BadgerDir")
 	}
 
-	bopts := badger.DefaultOptions(cfg.BadgerDir)
-	bopts.Logger = nil
-	db, err := badger.Open(bopts)
+	db, err := openBadgerDB(cfg.BadgerDir)
 	if err != nil {
-		return nil, fmt.Errorf("open badger: %w", err)
+		return nil, err
+	}
+	s, err := newTwoTierPositionStoreWithDB(db, cfg, true)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func newTwoTierPositionStoreWithDB(db *badger.DB, cfg *PositionPersistence, ownDB bool) (*twoTierPositionStore, error) {
+	if db == nil {
+		return nil, fmt.Errorf("position store: db is nil")
+	}
+	if cfg == nil || cfg.BadgerDir == "" {
+		return nil, fmt.Errorf("position persistence requires non-nil PositionPersistence and BadgerDir")
 	}
 
 	interval := cfg.FlushToRedisInterval
@@ -77,6 +101,7 @@ func newTwoTierPositionStore(cfg *PositionPersistence) (*twoTierPositionStore, e
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &twoTierPositionStore{
 		db:        db,
+		ownDB:     ownDB,
 		redisKey:  redisKey,
 		badgerKey: []byte(bkey),
 		interval:  interval,
@@ -169,9 +194,12 @@ func (s *twoTierPositionStore) Close() error {
 	_ = s.flushRedis(ctx)
 
 	var firstErr error
-	if err := s.db.Close(); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("close badger: %w", err)
+	if s.ownDB && s.db != nil {
+		if err := s.db.Close(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("close badger: %w", err)
+		}
 	}
+	s.db = nil
 	if s.rdb != nil {
 		if err := s.rdb.Close(); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("close redis: %w", err)

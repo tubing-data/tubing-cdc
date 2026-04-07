@@ -4,7 +4,7 @@ When I joined the second company in my career, I was assigned to build a CDC sys
 
 ## Long-term goal (DBLog)
 
-The intended end state is an implementation aligned with *DBLog: A Watermark Based Change-Data-Capture Framework* by Andreas Andreakis and Ioannis Papapanagiotou ([arXiv:2010.12597](https://arxiv.org/abs/2010.12597), 2020). A copy of the paper lives at [2010.12597v1.pdf](2010.12597v1.pdf). DBLog interleaves transaction-log events with chunked, primary-key-ordered `SELECT` full-state capture using a **watermark table** on the source, so log processing does not stall for long periods, history order is preserved (no time-travel), and table locks are avoided.
+The intended end state is an implementation aligned with *DBLog: A Watermark Based Change-Data-Capture Framework* by Andreas Andreakis and Ioannis Papapanagiotou ([arXiv:2010.12597](https://arxiv.org/abs/2010.12597), 2020). A copy of the paper lives at [dbLog.pdf](dbLog.pdf). DBLog interleaves transaction-log events with chunked, primary-key-ordered `SELECT` full-state capture using a **watermark table** on the source, so log processing does not stall for long periods, history order is preserved (no time-travel), and table locks are avoided.
 
 Full citation: [references.md](references.md).
 

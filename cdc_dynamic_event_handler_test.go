@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/go-mysql-org/go-mysql/canal"
+	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/go-mysql-org/go-mysql/schema"
 )
 
@@ -495,6 +496,73 @@ func TestDynamicTableEventHandler_OnRow_customSink(t *testing.T) {
 			}
 			if !strings.Contains(sink.rows[0], tt.wantJSON) {
 				t.Fatalf("line %q should contain %q", sink.rows[0], tt.wantJSON)
+			}
+		})
+	}
+}
+
+func TestDynamicTableEventHandler_OnRow_envelope(t *testing.T) {
+	tbl := &schema.Table{
+		Schema: "db",
+		Name:   "t",
+		Columns: []schema.TableColumn{
+			{Name: "id", Type: schema.TYPE_NUMBER},
+		},
+		PKColumns: []int{0},
+	}
+	tests := []struct {
+		name string
+		ev   *canal.RowsEvent
+	}{
+		{
+			name: "insert",
+			ev: &canal.RowsEvent{
+				Table:   tbl,
+				Action:  canal.InsertAction,
+				Rows:    [][]interface{}{{int64(5)}},
+				Header:  &replication.EventHeader{LogPos: 777},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &sliceRowSink{}
+			h := NewDynamicTableEventHandler(nil, WithRowEventSink(sink), WithDBLogEnvelope(true))
+			if err := h.OnRow(tt.ev); err != nil {
+				t.Fatal(err)
+			}
+			if len(sink.rows) != 1 {
+				t.Fatalf("got %d", len(sink.rows))
+			}
+			parts := strings.SplitN(sink.rows[0], "\t", 3)
+			if len(parts) != 3 {
+				t.Fatalf("sink line: %q", sink.rows[0])
+			}
+			var env CDCEventEnvelope
+			if err := json.Unmarshal([]byte(parts[2]), &env); err != nil {
+				t.Fatal(err)
+			}
+			if env.SchemaVersion != DefaultEnvelopeSchemaVersion {
+				t.Fatalf("schema_version %q", env.SchemaVersion)
+			}
+			if env.Origin != OriginLog {
+				t.Fatalf("origin %q", env.Origin)
+			}
+			if env.Action != tt.ev.Action {
+				t.Fatalf("action %q", env.Action)
+			}
+			if env.Table.Database != "db" || env.Table.Table != "t" {
+				t.Fatalf("table %+v", env.Table)
+			}
+			if env.Position == nil || env.Position.Pos != 777 {
+				t.Fatalf("position %+v", env.Position)
+			}
+			pkID, ok := env.PrimaryKey["id"].(float64)
+			if !ok || pkID != 5 {
+				t.Fatalf("primary_key %#v", env.PrimaryKey)
+			}
+			if string(env.Payload) != `{"id":5}` {
+				t.Fatalf("payload %s", env.Payload)
 			}
 		})
 	}
