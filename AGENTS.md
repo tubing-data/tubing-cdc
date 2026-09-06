@@ -41,6 +41,16 @@ From repository root:
 go test ./...
 ```
 
+Before handing off code changes, run the repository-wide Codex check:
+
+```bash
+bash scripts/codex/check.sh
+```
+
+Format changed Go files with `gofmt` first. The check runs `go vet ./...` and
+`go test ./...`. Codex cloud bootstrap and cache-refresh commands are documented
+in `docs/codex-development.md`.
+
 Integration tests (`cdc_dem_test_integration_test.go`, package `tubing_cdc_test`) need Docker available for Testcontainers.
 
 ## Docs index

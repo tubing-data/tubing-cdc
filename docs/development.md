@@ -1,5 +1,8 @@
 # Local development and testing
 
+- **Codex** — Project bootstrap, maintenance, and verification scripts are
+  documented in [codex-development.md](codex-development.md).
+
 - **Docker Compose** — `docker-compose.yml` (repository root) defines:
   - **MySQL** — image built from `docker/mysql/Dockerfile`; port `3306`, database `cdc_test`, root password `root` (for manual CDC experiments).
   - **Elasticsearch** — official `8.12.2` image, single-node, HTTP on port `9200`, security and TLS disabled for local use. Handy when exercising **`ElasticsearchRowEventSink`** or ad-hoc indexing against `http://localhost:9200`.
