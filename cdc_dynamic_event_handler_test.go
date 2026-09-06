@@ -1,7 +1,9 @@
 package tubing_cdc
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -10,6 +12,100 @@ import (
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/go-mysql-org/go-mysql/schema"
 )
+
+func TestDynamicTableEventHandler_OnRow_pipeline(t *testing.T) {
+	tbl := &schema.Table{
+		Schema: "db",
+		Name:   "orders",
+		Columns: []schema.TableColumn{
+			{Name: "id", Type: schema.TYPE_NUMBER},
+			{Name: "status", Type: schema.TYPE_STRING},
+		},
+		PKColumns: []int{0},
+	}
+	sink := &sliceRowSink{}
+	h := NewDynamicTableEventHandler(nil,
+		WithRowEventSink(sink),
+		WithDBLogEnvelope(true),
+		WithPipeline(Pipe(
+			ForTable("db.orders", Map(func(event Event) Event {
+				event.After["status"] = strings.ToUpper(event.After["status"].(string))
+				event.After["derived"] = true
+				return event
+			})),
+			Filter(func(event Event) bool { return event.After["status"] == "PAID" }),
+		)),
+	)
+
+	for _, row := range [][]interface{}{{int64(1), "paid"}, {int64(2), "pending"}} {
+		if err := h.OnRow(&canal.RowsEvent{Table: tbl, Action: canal.InsertAction, Rows: [][]interface{}{row}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(sink.rows) != 1 {
+		t.Fatalf("got %d rows: %v", len(sink.rows), sink.rows)
+	}
+	parts := strings.SplitN(sink.rows[0], "\t", 3)
+	var envelope CDCEventEnvelope
+	if err := json.Unmarshal([]byte(parts[2]), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if string(envelope.Payload) != `{"derived":true,"id":1,"status":"PAID"}` {
+		t.Fatalf("payload: %s", envelope.Payload)
+	}
+	if envelope.PrimaryKey["id"].(float64) != 1 {
+		t.Fatalf("primary key: %#v", envelope.PrimaryKey)
+	}
+}
+
+func TestDynamicTableEventHandler_OnRow_pipelineUpdateShape(t *testing.T) {
+	tbl := &schema.Table{Schema: "db", Name: "t", Columns: []schema.TableColumn{{Name: "id"}}}
+	sink := &sliceRowSink{}
+	h := NewDynamicTableEventHandler(nil, WithRowEventSink(sink), WithPipeline(Map(func(event Event) Event {
+		event.Before["side"] = "before"
+		event.After["side"] = "after"
+		return event
+	})))
+	err := h.OnRow(&canal.RowsEvent{
+		Table: tbl, Action: canal.UpdateAction,
+		Rows: [][]interface{}{{int64(1)}, {int64(2)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sink.rows[0], `"side":"before"`) || !strings.Contains(sink.rows[0], `"side":"after"`) {
+		t.Fatalf("unexpected update: %s", sink.rows[0])
+	}
+}
+
+func TestDynamicTableEventHandler_OnRow_pipelineErrorPolicies(t *testing.T) {
+	tbl := &schema.Table{Schema: "db", Name: "t", Columns: []schema.TableColumn{{Name: "id"}}}
+	want := errors.New("transform failed")
+	failing := MapE(func(context.Context, Event) (Event, error) { return Event{}, want })
+
+	strict := NewDynamicTableEventHandler(nil, WithRowEventSink(&sliceRowSink{}), WithPipeline(failing))
+	err := strict.OnRow(&canal.RowsEvent{Table: tbl, Action: canal.InsertAction, Rows: [][]interface{}{{1}}})
+	if !errors.Is(err, want) {
+		t.Fatalf("strict error = %v", err)
+	}
+
+	skippedSink := &sliceRowSink{}
+	reported := false
+	skipping := NewDynamicTableEventHandler(nil,
+		WithRowEventSink(skippedSink),
+		WithPipeline(failing),
+		WithPipelineErrorHandler(SkipPipelineError(func(_ context.Context, _ Event, err error) error {
+			reported = errors.Is(err, want)
+			return nil
+		})),
+	)
+	if err := skipping.OnRow(&canal.RowsEvent{Table: tbl, Action: canal.InsertAction, Rows: [][]interface{}{{1}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !reported || len(skippedSink.rows) != 0 {
+		t.Fatalf("reported=%v rows=%v", reported, skippedSink.rows)
+	}
+}
 
 func TestSnakeToExportedGoName(t *testing.T) {
 	tests := []struct {
@@ -517,10 +613,10 @@ func TestDynamicTableEventHandler_OnRow_envelope(t *testing.T) {
 		{
 			name: "insert",
 			ev: &canal.RowsEvent{
-				Table:   tbl,
-				Action:  canal.InsertAction,
-				Rows:    [][]interface{}{{int64(5)}},
-				Header:  &replication.EventHeader{LogPos: 777},
+				Table:  tbl,
+				Action: canal.InsertAction,
+				Rows:   [][]interface{}{{int64(5)}},
+				Header: &replication.EventHeader{LogPos: 777},
 			},
 		},
 	}
