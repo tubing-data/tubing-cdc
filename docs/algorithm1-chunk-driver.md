@@ -6,6 +6,10 @@ Set `Configs.FullSync` to run a complete snapshot automatically from `Run` or `R
 
 `Watermark`, `ChunkProgressPersistence`, a `RowSink`, and at least one valid `FullStateTableSpec` are required. Do not also set the lower-level `Algorithm1` or `FullStateJobQueue` fields. By default old cursors are cleared so each application start performs a fresh full sync; `FullSync.Resume` retains cursors for restart recovery.
 
+Chunk progress records persist `running`, `completed`, or `failed` status, the last error, and an
+update timestamp. With `Resume` enabled, completed table/run pairs are skipped rather than being
+mistaken for snapshots that never started.
+
 `TubingCDC.StartAlgorithm1ChunkDriver` runs a background loop that:
 
 1. Dequeues `FullStateJob` values from the configured `FullStateJobQueue`.

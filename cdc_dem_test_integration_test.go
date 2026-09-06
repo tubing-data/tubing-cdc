@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"github.com/docker/docker/client"
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
+	_ "github.com/go-sql-driver/mysql"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 
-	tubingcdc "tubing-cdc"
+	tubingcdc "github.com/tubing-data/tubing-cdc"
 )
 
 type rowCapture struct {

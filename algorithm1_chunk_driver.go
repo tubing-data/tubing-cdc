@@ -200,13 +200,25 @@ func (d *algorithm1ChunkDriver) runAlgorithm1SnapshotCycle(ctx context.Context, 
 	return algorithm1SnapshotCycleResult{Raw: rawRows, Reconciled: out}, nil
 }
 
-func (d *algorithm1ChunkDriver) runChunkedTable(ctx context.Context, spec FullStateTableSpec) error {
+func (d *algorithm1ChunkDriver) runChunkedTable(ctx context.Context, spec FullStateTableSpec) (runErr error) {
 	if d.cfg.ChunkStore == nil {
 		return fmt.Errorf("algorithm1 driver: ChunkStore is nil (required for chunked table job)")
 	}
 	if err := spec.Validate(); err != nil {
 		return err
 	}
+	defer func() {
+		if runErr != nil {
+			rec, err := d.cfg.ChunkStore.Get(spec.TableKey, spec.RunID)
+			if err != nil {
+				rec = ChunkProgressRecord{TableKey: spec.TableKey, RunID: spec.RunID, ChunkSize: spec.ChunkSize}
+			}
+			rec.Status = ChunkProgressFailed
+			rec.LastError = runErr.Error()
+			rec.UpdatedAt = time.Now().UTC()
+			_ = d.cfg.ChunkStore.Put(rec)
+		}
+	}()
 	id, err := ParseTableIdentity(strings.TrimSpace(spec.TableKey))
 	if err != nil {
 		return err
@@ -220,6 +232,9 @@ func (d *algorithm1ChunkDriver) runChunkedTable(ctx context.Context, spec FullSt
 		rec, err := d.loadChunkCursor(spec)
 		if err != nil {
 			return err
+		}
+		if rec.Status == ChunkProgressCompleted {
+			return nil
 		}
 
 		cycle, err := d.runAlgorithm1SnapshotCycle(ctx, spec, func() ([]map[string]any, error) {
@@ -242,7 +257,7 @@ func (d *algorithm1ChunkDriver) runChunkedTable(ctx context.Context, spec FullSt
 
 		raw := cycle.Raw
 		if len(raw) == 0 {
-			return d.cfg.ChunkStore.Delete(spec.TableKey, spec.RunID)
+			return d.cfg.ChunkStore.Put(ChunkProgressRecord{TableKey: spec.TableKey, RunID: spec.RunID, ChunkSize: spec.ChunkSize, AfterPK: rec.AfterPK, Status: ChunkProgressCompleted, UpdatedAt: time.Now().UTC()})
 		}
 
 		lastPK, err := pkTupleFromRowMap(spec.PKColumns, raw[len(raw)-1])
@@ -254,13 +269,17 @@ func (d *algorithm1ChunkDriver) runChunkedTable(ctx context.Context, spec FullSt
 			RunID:     spec.RunID,
 			ChunkSize: spec.ChunkSize,
 			AfterPK:   lastPK,
+			Status:    ChunkProgressRunning,
+			UpdatedAt: time.Now().UTC(),
 		}
 		if err := d.cfg.ChunkStore.Put(next); err != nil {
 			return err
 		}
 
 		if len(raw) < spec.ChunkSize {
-			return nil
+			next.Status = ChunkProgressCompleted
+			next.UpdatedAt = time.Now().UTC()
+			return d.cfg.ChunkStore.Put(next)
 		}
 	}
 }
@@ -308,6 +327,7 @@ func (d *algorithm1ChunkDriver) loadChunkCursor(spec FullStateTableSpec) (ChunkP
 		RunID:     spec.RunID,
 		ChunkSize: spec.ChunkSize,
 		AfterPK:   nil,
+		Status:    ChunkProgressRunning,
 	}, nil
 }
 

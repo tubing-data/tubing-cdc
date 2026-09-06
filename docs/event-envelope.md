@@ -6,6 +6,7 @@ This document defines the **P0** unified CDC event shape: one JSON object for bo
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `event_id` | string | Deterministic SHA-256 identifier derived from origin, table, action, position, primary key, and payload. Consumers can use it for replay deduplication. |
 | `schema_version` | string | Envelope version, e.g. `tubing-cdc-envelope-v0`. Bump when fields are added or semantics change. |
 | `origin` | string | `log` — from MySQL replication; `snapshot` — reserved for chunked PK reads (P2+). |
 | `action` | string | Canal row action: `insert`, `update`, `delete`. |
@@ -26,9 +27,8 @@ This document defines the **P0** unified CDC event shape: one JSON object for bo
 - Types and helpers: `event_envelope.go` (`CDCEventEnvelope`, `MarshalCDCEventEnvelope`, `PrimaryKeyFromTableRow`, …).
 - Handler option: `WithDBLogEnvelope(true)` on `NewDynamicTableEventHandler`.
 
-## Future work (P2+)
+## Remaining limitations
 
-- Populate `origin: "snapshot"` and stable ordering metadata for chunk rows.
 - Fill `position.file` from the canal syncer together with `pos` for a complete restart coordinate.
 - Optional strict mode or a dedicated `EnvelopeRowSink` if we want to deprecate duplicate `action` in `Emit` for envelope-only pipelines.
 

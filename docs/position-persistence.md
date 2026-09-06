@@ -23,7 +23,7 @@ Example:
 import (
     "time"
 
-    tubingcdc "tubing-cdc"
+    tubingcdc "github.com/tubing-data/tubing-cdc"
 )
 
 cfg := &tubingcdc.Configs{
@@ -44,3 +44,9 @@ cfg := &tubingcdc.Configs{
 The stored JSON shape is **`tubingcdc.BinlogStateRecord`** (`file`, `pos`, optional `gtid`, `gtid_flavor`). To read the last position from disk without opening the live process (for example to call **`RunFrom`** on startup), use **`tubingcdc.ReadBinlogStateFromBadger(badgerDir, badgerKey)`**; it returns **`mysql.Position`** and a GTID string you can pass to **`mysql.ParseGTIDSet`** together with your chosen flavor.
 
 Implementation: `position_store.go`, `position_handler_wrapper.go`.
+
+For the common restart path, use `RunTubingCDCWithRecovery(ctx, cfg)`. It reads a checkpoint
+from Redis first (when configured), falls back to Badger, and calls `RunFrom`; when no checkpoint
+exists it starts from the current MySQL master position. Redis-backed leader election requires
+`PositionPersistence` with Redis enabled and repeats this lookup for every leader term so a takeover never starts
+silently at the current master position.

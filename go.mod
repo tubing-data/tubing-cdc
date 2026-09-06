@@ -1,4 +1,4 @@
-module tubing-cdc
+module github.com/tubing-data/tubing-cdc
 
 go 1.21
 

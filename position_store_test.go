@@ -98,7 +98,7 @@ func TestTwoTierPositionStore_badgerRoundTrip(t *testing.T) {
 
 func TestTwoTierPositionStore_redisPeriodicFlush(t *testing.T) {
 	tests := []struct {
-		name    string
+		name     string
 		redisKey string
 	}{
 		{name: "default style key", redisKey: "tubing-cdc:test-periodic"},
@@ -111,10 +111,10 @@ func TestTwoTierPositionStore_redisPeriodicFlush(t *testing.T) {
 			dir := t.TempDir()
 			interval := 40 * time.Millisecond
 			s, err := newTwoTierPositionStore(&PositionPersistence{
-				BadgerDir:             dir,
-				RedisAddr:             mr.Addr(),
-				RedisKey:              tt.redisKey,
-				FlushToRedisInterval:  interval,
+				BadgerDir:            dir,
+				RedisAddr:            mr.Addr(),
+				RedisKey:             tt.redisKey,
+				FlushToRedisInterval: interval,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -178,6 +178,35 @@ func TestTwoTierPositionStore_CloseFlushesRedis(t *testing.T) {
 	got := mysql.Position{Name: rec.File, Pos: rec.Pos}
 	if got != want {
 		t.Fatalf("got %+v want %+v", got, want)
+	}
+}
+
+func TestReadBinlogStateFromRedis(t *testing.T) {
+	mr := miniredis.RunT(t)
+	cfg := &PositionPersistence{RedisAddr: mr.Addr(), RedisKey: "position"}
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+	want := BinlogStateRecord{File: "mysql-bin.000009", Pos: 456, GTID: "uuid:1-3"}
+	b, _ := json.Marshal(want)
+	if err := rdb.Set(context.Background(), cfg.RedisKey, b, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	pos, gtid, err := ReadBinlogStateFromRedis(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pos.Name != want.File || pos.Pos != want.Pos || gtid != want.GTID {
+		t.Fatalf("got position=%+v gtid=%q", pos, gtid)
+	}
+}
+
+func TestReadPersistedBinlogPosition_emptyDirectory(t *testing.T) {
+	_, found, err := readPersistedBinlogPosition(context.Background(), &PositionPersistence{BadgerDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found {
+		t.Fatal("unexpected checkpoint")
 	}
 }
 

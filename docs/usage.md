@@ -3,7 +3,7 @@
 Create a client with `Configs`. Table names must be fully qualified as `database.table`; each entry is turned into an include regex for canal.
 
 ```go
-import tubingcdc "tubing-cdc"
+import tubingcdc "github.com/tubing-data/tubing-cdc"
 
 cfg := &tubingcdc.Configs{
     Address:  "127.0.0.1:3306",

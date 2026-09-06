@@ -89,6 +89,26 @@ func TestChunkProgressStore_PutGetRoundTrip(t *testing.T) {
 	}
 }
 
+func TestChunkProgressStore_completionStateRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	s, err := newChunkProgressStore(&ChunkProgressPersistence{BadgerDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	want := ChunkProgressRecord{TableKey: "cdc.orders", RunID: "run", ChunkSize: 10, Status: ChunkProgressCompleted, UpdatedAt: time.Now().UTC()}
+	if err := s.Put(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(want.TableKey, want.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ChunkProgressCompleted || got.UpdatedAt.IsZero() {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 func TestChunkProgressStore_Get_notFound(t *testing.T) {
 	dir := t.TempDir()
 	s, err := newChunkProgressStore(&ChunkProgressPersistence{BadgerDir: dir})

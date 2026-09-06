@@ -147,7 +147,7 @@ package main
 import (
 	"log"
 
-	tubingcdc "tubing-cdc"
+	tubingcdc "github.com/tubing-data/tubing-cdc"
 )
 
 func main() {
@@ -179,6 +179,10 @@ func main() {
 ```
 
 Use `RunFrom(mysql.Position)` when the application needs to resume from a known binlog position. For durable checkpointing, configure position persistence as shown below, read the saved position on startup, and pass it to `RunFrom`.
+
+Alternatively, `RunTubingCDCWithRecovery(ctx, cfg)` performs that lookup automatically. It prefers
+the Redis checkpoint when configured, falls back to local Badger, and starts at the current master
+position only when no checkpoint exists.
 
 ## Event model
 
@@ -218,6 +222,11 @@ Attach a sink with `WithRowEventSink`:
 | Custom `RowEventSink` | Sends events to an application-specific destination. |
 
 Handlers can also apply field transformations before serialization. Configuration examples are available in [event handlers and sinks](docs/event-handlers.md).
+
+For production delivery, wrap a sink with `NewReliableRowEventSink`. The wrapper serializes
+concurrent binlog/snapshot calls, retries transient failures, optionally emits a `DeadLetterEvent`,
+and exposes `RuntimeMetrics.Snapshot()` counters. Pass the same wrapped sink instance to the
+binlog handler and `FullSync.RowSink`.
 
 ## Position persistence
 

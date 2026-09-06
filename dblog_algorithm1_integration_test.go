@@ -11,7 +11,7 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 
-	tubingcdc "tubing-cdc"
+	tubingcdc "github.com/tubing-data/tubing-cdc"
 )
 
 func mySQLResultToRowMaps(t *testing.T, rr *mysql.Result) []map[string]any {

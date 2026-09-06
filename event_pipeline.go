@@ -12,6 +12,7 @@ type Row map[string]any
 // Insert and snapshot events normally set After, updates set Before and After,
 // and deletes set Before.
 type Event struct {
+	EventID       string
 	SchemaVersion string
 	Origin        EventOrigin
 	Action        string
