@@ -100,6 +100,12 @@ func runTubingCDCWithLeaderElection(ctx context.Context, cfg *Configs, pos *mysq
 	if err := lec.validate(); err != nil {
 		return err
 	}
+	if cfg.PositionPersistence == nil || strings.TrimSpace(cfg.PositionPersistence.BadgerDir) == "" {
+		return fmt.Errorf("tubingcdc: leader election requires PositionPersistence for safe failover")
+	}
+	if strings.TrimSpace(cfg.PositionPersistence.RedisAddr) == "" {
+		return fmt.Errorf("tubingcdc: leader election requires a Redis position checkpoint for cross-instance failover")
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -111,7 +117,14 @@ func runTubingCDCWithLeaderElection(ctx context.Context, cfg *Configs, pos *mysq
 			}
 			return err
 		}
-		runErr := runOneCDCLeaderTerm(ctx, cfg, pos, sess)
+		termPos := pos
+		if saved, found, rerr := readPersistedBinlogPosition(ctx, cfg.PositionPersistence); rerr != nil {
+			sess.Release()
+			return rerr
+		} else if found {
+			termPos = &saved
+		}
+		runErr := runOneCDCLeaderTerm(ctx, cfg, termPos, sess)
 		sess.Release()
 		if runErr != nil {
 			if errors.Is(runErr, ErrLeadershipLost) {

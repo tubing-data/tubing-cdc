@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -18,6 +19,9 @@ const (
 	defaultBadgerStateKey   = "v1/mysql-binlog-state"
 	defaultGTIDFlavor       = "mysql"
 )
+
+// ErrBinlogPositionNotFound means that a persistence backend has no saved checkpoint yet.
+var ErrBinlogPositionNotFound = errors.New("tubingcdc: binlog position not found")
 
 // BinlogStateRecord is the JSON shape stored in Badger and Redis for crash recovery.
 type BinlogStateRecord struct {
@@ -237,9 +241,67 @@ func ReadBinlogStateFromBadger(badgerDir, badgerKey string) (mysql.Position, str
 	})
 	if err != nil {
 		if errors.Is(err, badger.ErrKeyNotFound) {
-			return mysql.Position{}, "", fmt.Errorf("no saved position at key %q", badgerKey)
+			return mysql.Position{}, "", fmt.Errorf("%w: no saved position at Badger key %q", ErrBinlogPositionNotFound, badgerKey)
 		}
 		return mysql.Position{}, "", fmt.Errorf("read badger: %w", err)
 	}
 	return mysql.Position{Name: rec.File, Pos: rec.Pos}, rec.GTID, nil
+}
+
+// ReadBinlogStateFromRedis returns the last position mirrored to Redis.
+func ReadBinlogStateFromRedis(ctx context.Context, cfg *PositionPersistence) (mysql.Position, string, error) {
+	if cfg == nil || cfg.RedisAddr == "" {
+		return mysql.Position{}, "", fmt.Errorf("position persistence: RedisAddr is empty")
+	}
+	key := cfg.RedisKey
+	if key == "" {
+		key = defaultRedisPositionKey
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword, DB: cfg.RedisDB})
+	defer rdb.Close()
+	b, err := rdb.Get(ctx, key).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return mysql.Position{}, "", fmt.Errorf("%w at Redis key %q", ErrBinlogPositionNotFound, key)
+	}
+	if err != nil {
+		return mysql.Position{}, "", fmt.Errorf("read Redis position: %w", err)
+	}
+	var rec BinlogStateRecord
+	if err := json.Unmarshal(b, &rec); err != nil {
+		return mysql.Position{}, "", fmt.Errorf("decode Redis position: %w", err)
+	}
+	if rec.File == "" {
+		return mysql.Position{}, "", fmt.Errorf("decode Redis position: empty binlog file")
+	}
+	return mysql.Position{Name: rec.File, Pos: rec.Pos}, rec.GTID, nil
+}
+
+func readPersistedBinlogPosition(ctx context.Context, cfg *PositionPersistence) (mysql.Position, bool, error) {
+	if cfg == nil {
+		return mysql.Position{}, false, nil
+	}
+	if cfg.RedisAddr != "" {
+		pos, _, err := ReadBinlogStateFromRedis(ctx, cfg)
+		if err == nil {
+			return pos, true, nil
+		}
+		if !errors.Is(err, ErrBinlogPositionNotFound) {
+			return mysql.Position{}, false, err
+		}
+	}
+	entries, err := os.ReadDir(cfg.BadgerDir)
+	if errors.Is(err, os.ErrNotExist) || (err == nil && len(entries) == 0) {
+		return mysql.Position{}, false, nil
+	}
+	if err != nil {
+		return mysql.Position{}, false, fmt.Errorf("inspect Badger position directory: %w", err)
+	}
+	pos, _, err := ReadBinlogStateFromBadger(cfg.BadgerDir, cfg.BadgerKey)
+	if err == nil {
+		return pos, true, nil
+	}
+	if errors.Is(err, ErrBinlogPositionNotFound) {
+		return mysql.Position{}, false, nil
+	}
+	return mysql.Position{}, false, err
 }

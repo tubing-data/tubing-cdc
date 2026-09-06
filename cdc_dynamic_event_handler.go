@@ -257,11 +257,15 @@ func (h *DynamicTableEventHandler) emitEvent(event Event) error {
 		return fmt.Errorf("CDC %s %s marshal: %w", event.Action, event.TableKey(), err)
 	}
 	if h.useEnvelope {
+		if event.EventID == "" {
+			event.EventID = StableEventID(event.Origin, event.Action, event.TableKey(), event.PrimaryKey, event.Position, b)
+		}
 		schemaVersion := event.SchemaVersion
 		if schemaVersion == "" {
 			schemaVersion = DefaultEnvelopeSchemaVersion
 		}
 		b, err = json.Marshal(CDCEventEnvelope{
+			EventID:       event.EventID,
 			SchemaVersion: schemaVersion,
 			Origin:        event.Origin,
 			Action:        event.Action,

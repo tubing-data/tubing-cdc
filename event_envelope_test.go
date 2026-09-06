@@ -85,7 +85,7 @@ func TestPrimaryKeyFromTableRow(t *testing.T) {
 
 func TestPrimaryKeyFromResolvedPayload(t *testing.T) {
 	tbl := &schema.Table{
-		Columns: []schema.TableColumn{{Name: "id"}},
+		Columns:   []schema.TableColumn{{Name: "id"}},
 		PKColumns: []int{0},
 	}
 	tests := []struct {
@@ -153,7 +153,7 @@ func TestBinlogPositionFromSources(t *testing.T) {
 
 func TestMarshalCDCEventEnvelope(t *testing.T) {
 	tbl := &schema.Table{
-		Columns: []schema.TableColumn{{Name: "id"}},
+		Columns:   []schema.TableColumn{{Name: "id"}},
 		PKColumns: []int{0},
 	}
 	inner := []byte(`{"id":1}`)
@@ -224,7 +224,20 @@ func TestMarshalCDCEventEnvelope(t *testing.T) {
 			if string(env.Payload) != string(tt.inner) {
 				t.Fatalf("payload got %s want %s", env.Payload, tt.inner)
 			}
+			if env.EventID == "" {
+				t.Fatal("event_id is empty")
+			}
 		})
+	}
+}
+
+func TestStableEventID_deterministicAndPayloadSensitive(t *testing.T) {
+	pos := &BinlogPosition{File: "bin.1", Pos: 42}
+	a := StableEventID(OriginLog, canal.InsertAction, "a.b", map[string]any{"id": 1}, pos, []byte(`{"id":1}`))
+	b := StableEventID(OriginLog, canal.InsertAction, "a.b", map[string]any{"id": 1}, pos, []byte(`{"id":1}`))
+	c := StableEventID(OriginLog, canal.InsertAction, "a.b", map[string]any{"id": 2}, pos, []byte(`{"id":2}`))
+	if a == "" || a != b || a == c {
+		t.Fatalf("unexpected IDs: %q %q %q", a, b, c)
 	}
 }
 

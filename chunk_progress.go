@@ -3,6 +3,7 @@ package tubing_cdc
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 const (
@@ -12,14 +13,25 @@ const (
 	DefaultChunkProgressKeyPrefix = "v1/chunk-progress/"
 )
 
+type ChunkProgressStatus string
+
+const (
+	ChunkProgressRunning   ChunkProgressStatus = "running"
+	ChunkProgressCompleted ChunkProgressStatus = "completed"
+	ChunkProgressFailed    ChunkProgressStatus = "failed"
+)
+
 // ChunkProgressRecord is restart-safe cursor state for primary-key-ordered full-state chunks (DBLog-style).
 // AfterPK holds the last primary key from the previous chunk; the next chunk query uses rows strictly greater
 // than this tuple in PK column order. Empty AfterPK means start from the beginning of the table.
 type ChunkProgressRecord struct {
-	TableKey  string `json:"table_key"`
-	RunID     string `json:"run_id,omitempty"`
-	ChunkSize int    `json:"chunk_size"`
-	AfterPK   []any  `json:"after_pk,omitempty"`
+	TableKey  string              `json:"table_key"`
+	RunID     string              `json:"run_id,omitempty"`
+	ChunkSize int                 `json:"chunk_size"`
+	AfterPK   []any               `json:"after_pk,omitempty"`
+	Status    ChunkProgressStatus `json:"status,omitempty"`
+	LastError string              `json:"last_error,omitempty"`
+	UpdatedAt time.Time           `json:"updated_at,omitempty"`
 }
 
 func (r ChunkProgressRecord) normalizedRunID() string {
@@ -40,6 +52,11 @@ func (r ChunkProgressRecord) Validate() error {
 	}
 	if r.ChunkSize <= 0 {
 		return fmt.Errorf("chunk progress: chunk_size must be positive")
+	}
+	switch r.Status {
+	case "", ChunkProgressRunning, ChunkProgressCompleted, ChunkProgressFailed:
+	default:
+		return fmt.Errorf("chunk progress: invalid status %q", r.Status)
 	}
 	return nil
 }

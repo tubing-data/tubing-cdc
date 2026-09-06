@@ -28,11 +28,11 @@ func TestRunTubingCDCWithLeaderElection_validation(t *testing.T) {
 		{
 			name: "nil leader election",
 			cfg: &Configs{
-				Address:         "x",
-				Username:        "u",
-				Password:        "p",
-				Tables:          []string{"db.t"},
-				LeaderElection:  nil,
+				Address:        "x",
+				Username:       "u",
+				Password:       "p",
+				Tables:         []string{"db.t"},
+				LeaderElection: nil,
 			},
 			wantSub: "LeaderElection is not configured",
 		},
@@ -62,6 +62,23 @@ func TestRunTubingCDCWithLeaderElection_validation(t *testing.T) {
 				},
 			},
 			wantSub: "Lease must be at least 3s",
+		},
+		{
+			name: "missing failover checkpoint",
+			cfg: &Configs{
+				Address: "x", Username: "u", Password: "p", Tables: []string{"db.t"},
+				LeaderElection: &LeaderElectionConfig{RedisAddr: "127.0.0.1:6379", Lease: 5 * time.Second},
+			},
+			wantSub: "requires PositionPersistence",
+		},
+		{
+			name: "local-only failover checkpoint",
+			cfg: &Configs{
+				Address: "x", Username: "u", Password: "p", Tables: []string{"db.t"},
+				LeaderElection:      &LeaderElectionConfig{RedisAddr: "127.0.0.1:6379", Lease: 5 * time.Second},
+				PositionPersistence: &PositionPersistence{BadgerDir: t.TempDir()},
+			},
+			wantSub: "requires a Redis position checkpoint",
 		},
 	}
 	for _, tt := range tests {
@@ -166,6 +183,7 @@ func TestRunTubingCDCWithLeaderElectionFrom_acceptsPosition(t *testing.T) {
 			RedisAddr: "127.0.0.1:1",
 			Lease:     5 * time.Second,
 		},
+		PositionPersistence: &PositionPersistence{BadgerDir: t.TempDir(), RedisAddr: "127.0.0.1:1"},
 	}, mysql.Position{Name: "f", Pos: 4})
 	if err == nil {
 		t.Fatal("expected error (no redis)")

@@ -293,3 +293,19 @@ func TestTubingCDC_StartAlgorithm1ChunkDriver_nilCanal(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestAlgorithm1ChunkDriver_completedChunkIsSkipped(t *testing.T) {
+	store, err := newChunkProgressStore(&ChunkProgressPersistence{BadgerDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	spec := FullStateTableSpec{TableKey: "db.t", PKColumns: []string{"id"}, ChunkSize: 10, RunID: "run"}
+	if err := store.Put(ChunkProgressRecord{TableKey: spec.TableKey, RunID: spec.RunID, ChunkSize: spec.ChunkSize, Status: ChunkProgressCompleted, UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	d := &algorithm1ChunkDriver{cfg: Algorithm1ChunkDriverConfig{ChunkStore: store}}
+	if err := d.runChunkedTable(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+}

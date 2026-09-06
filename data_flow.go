@@ -223,6 +223,43 @@ func (t *TubingCDC) RunFrom(pos mysql.Position) error {
 	return t.river.RunFrom(pos)
 }
 
+// RunTubingCDCWithRecovery builds and runs a TubingCDC, resuming from PositionPersistence when a
+// checkpoint exists. If no checkpoint exists yet, it starts at the current MySQL master position.
+// Cancelling ctx closes the CDC instance and stops replication.
+func RunTubingCDCWithRecovery(ctx context.Context, cfg *Configs) error {
+	if ctx == nil {
+		return fmt.Errorf("tubingcdc: context is nil")
+	}
+	if cfg == nil {
+		return fmt.Errorf("tubingcdc: configs is nil")
+	}
+	pos, found, err := readPersistedBinlogPosition(ctx, cfg.PositionPersistence)
+	if err != nil {
+		return err
+	}
+	cdc, err := NewTubingCDC(cfg)
+	if err != nil {
+		return err
+	}
+	runErr := make(chan error, 1)
+	go func() {
+		if found {
+			runErr <- cdc.RunFrom(pos)
+			return
+		}
+		runErr <- cdc.Run()
+	}()
+	select {
+	case <-ctx.Done():
+		cdc.Close()
+		<-runErr
+		return ctx.Err()
+	case err := <-runErr:
+		cdc.Close()
+		return err
+	}
+}
+
 func (t *TubingCDC) runFromWithFullSync(pos mysql.Position) error {
 	fs := t.fullSync
 	if fs.started {

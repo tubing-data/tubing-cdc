@@ -69,26 +69,23 @@ func (w *algorithm1HandlerWrapper) recordRowEvent(e *canal.RowsEvent) {
 	tbl := e.Table
 	switch e.Action {
 	case canal.InsertAction:
-		if len(e.Rows) < 1 {
-			return
+		for _, row := range e.Rows {
+			m := rowMapFromCanalRow(tbl, row)
+			w.tracker.RecordTargetRowChange(tableFQN(tbl.Schema, tbl.Name), m)
 		}
-		m := rowMapFromCanalRow(tbl, e.Rows[0])
-		w.tracker.RecordTargetRowChange(tableFQN(tbl.Schema, tbl.Name), m)
 	case canal.DeleteAction:
-		if len(e.Rows) < 1 {
-			return
+		for _, row := range e.Rows {
+			m := rowMapFromCanalRow(tbl, row)
+			w.tracker.RecordTargetRowChange(tableFQN(tbl.Schema, tbl.Name), m)
 		}
-		m := rowMapFromCanalRow(tbl, e.Rows[0])
-		w.tracker.RecordTargetRowChange(tableFQN(tbl.Schema, tbl.Name), m)
 	case canal.UpdateAction:
-		if len(e.Rows) < 2 {
-			return
-		}
-		before := rowMapFromCanalRow(tbl, e.Rows[0])
-		after := rowMapFromCanalRow(tbl, e.Rows[1])
 		tk := tableFQN(tbl.Schema, tbl.Name)
-		w.tracker.RecordTargetRowChange(tk, before)
-		w.tracker.RecordTargetRowChange(tk, after)
+		for i := 0; i+1 < len(e.Rows); i += 2 {
+			before := rowMapFromCanalRow(tbl, e.Rows[i])
+			after := rowMapFromCanalRow(tbl, e.Rows[i+1])
+			w.tracker.RecordTargetRowChange(tk, before)
+			w.tracker.RecordTargetRowChange(tk, after)
+		}
 	default:
 		return
 	}

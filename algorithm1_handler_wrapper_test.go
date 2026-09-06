@@ -169,3 +169,42 @@ func TestWrapHandlerWithAlgorithm1_dynamicTarget(t *testing.T) {
 		t.Fatalf("dynamic target did not reconcile: %#v", out)
 	}
 }
+
+func TestWrapHandlerWithAlgorithm1_recordsEveryRowInRowsEvent(t *testing.T) {
+	tests := []struct {
+		name   string
+		action string
+		rows   [][]interface{}
+	}{
+		{"multi_insert", canal.InsertAction, [][]interface{}{{int64(1)}, {int64(2)}, {int64(3)}}},
+		{"multi_delete", canal.DeleteAction, [][]interface{}{{int64(1)}, {int64(2)}, {int64(3)}}},
+		{"multi_update", canal.UpdateAction, [][]interface{}{{int64(1)}, {int64(2)}, {int64(3)}, {int64(4)}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tracker := NewAlgorithm1Tracker()
+			if err := tracker.BeginCapture("app.users", "low", "high", []string{"id"}); err != nil {
+				t.Fatal(err)
+			}
+			_ = tracker.OnWatermark(WatermarkBinlogEvent{NewValue: "low"})
+			h := wrapHandlerWithAlgorithm1(&countingRowHandler{}, tracker, "app.users")
+			tbl := &schema.Table{Schema: "app", Name: "users", Columns: []schema.TableColumn{{Name: "id"}}}
+			if err := h.OnRow(&canal.RowsEvent{Table: tbl, Action: tt.action, Rows: tt.rows}); err != nil {
+				t.Fatal(err)
+			}
+			_ = tracker.OnWatermark(WatermarkBinlogEvent{NewValue: "high"})
+			chunk := []map[string]any{{"id": int64(1)}, {"id": int64(2)}, {"id": int64(3)}, {"id": int64(4)}}
+			out, err := tracker.ReconcileChunkRows(chunk)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 1
+			if tt.action == canal.UpdateAction {
+				want = 0
+			}
+			if len(out) != want {
+				t.Fatalf("reconciled rows=%v, want %d remaining", out, want)
+			}
+		})
+	}
+}

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"syscall"
 
-	tubingcdc "tubing-cdc"
+	tubingcdc "github.com/tubing-data/tubing-cdc"
 )
 
 const tableKey = "cdc_test.orders"

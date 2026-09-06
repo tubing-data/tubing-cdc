@@ -1,6 +1,7 @@
 package tubing_cdc
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -52,13 +53,30 @@ type BinlogPosition struct {
 // (future) snapshot-origin rows. Payload holds the existing canal-oriented JSON (row object or
 // update before/after) for compatibility with current sinks and consumers.
 type CDCEventEnvelope struct {
-	SchemaVersion string            `json:"schema_version"`
-	Origin        EventOrigin       `json:"origin"`
-	Action        string            `json:"action"`
-	Table         TableIdentity     `json:"table"`
-	PrimaryKey    map[string]any    `json:"primary_key,omitempty"`
-	Position      *BinlogPosition   `json:"position,omitempty"`
-	Payload       json.RawMessage   `json:"payload"`
+	EventID       string          `json:"event_id,omitempty"`
+	SchemaVersion string          `json:"schema_version"`
+	Origin        EventOrigin     `json:"origin"`
+	Action        string          `json:"action"`
+	Table         TableIdentity   `json:"table"`
+	PrimaryKey    map[string]any  `json:"primary_key,omitempty"`
+	Position      *BinlogPosition `json:"position,omitempty"`
+	Payload       json.RawMessage `json:"payload"`
+}
+
+// StableEventID returns a deterministic ID for idempotent downstream processing. Replaying the
+// same event with the same source coordinates and payload produces the same ID.
+func StableEventID(origin EventOrigin, action, tableKey string, primaryKey map[string]any, position *BinlogPosition, payloadJSON []byte) string {
+	canonical := struct {
+		Origin     EventOrigin     `json:"origin"`
+		Action     string          `json:"action"`
+		Table      string          `json:"table"`
+		PrimaryKey map[string]any  `json:"primary_key,omitempty"`
+		Position   *BinlogPosition `json:"position,omitempty"`
+		Payload    json.RawMessage `json:"payload"`
+	}{origin, action, tableKey, primaryKey, position, json.RawMessage(payloadJSON)}
+	b, _ := json.Marshal(canonical)
+	sum := sha256.Sum256(b)
+	return fmt.Sprintf("%x", sum[:])
 }
 
 // JSONFieldNameForColumn matches DynamicTableEventHandler row JSON keys (MySQL column name, or
@@ -145,5 +163,6 @@ func MarshalCDCEventEnvelope(
 		Position:      BinlogPositionFromSources(replicationPos, header),
 		Payload:       json.RawMessage(append([]byte(nil), innerPayloadJSON...)),
 	}
+	env.EventID = StableEventID(origin, action, tableKey, env.PrimaryKey, env.Position, innerPayloadJSON)
 	return json.Marshal(env)
 }
