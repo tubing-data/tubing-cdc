@@ -118,6 +118,25 @@ The MySQL binlog pipeline and the DBLog P0-P6 components described in the [roadm
 
 Review [coverage versus DBLog](docs/coverage-vs-dblog.md) before relying on the snapshot or HA features in a production design.
 
+## Installation
+
+Install the latest published version with Go:
+
+```bash
+go get github.com/tubing-data/tubing-cdc@v0.0.1
+```
+
+Then import the module in your application:
+
+```go
+import tubingcdc "github.com/tubing-data/tubing-cdc"
+```
+
+For reproducible builds, keep the version in `go.mod` (for example, `v0.0.1`) and commit both
+`go.mod` and `go.sum`. The library does not install or manage MySQL, Redis, Kafka, or Elasticsearch;
+provide those services separately only when the corresponding persistence, HA, or sink features are
+enabled. A Docker-based local environment is available with `make demo`; see the [quick start](docs/quick-start.md).
+
 ## Requirements
 
 - Go 1.21 or later

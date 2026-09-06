@@ -1,5 +1,16 @@
 # Usage
 
+## Install
+
+From an existing Go module, install a released version:
+
+```bash
+go get github.com/tubing-data/tubing-cdc@v0.0.1
+```
+
+The package requires Go 1.21 or later. MySQL must have row-based binary logging enabled; Redis,
+Kafka, and Elasticsearch are optional and are needed only when their integrations are configured.
+
 Create a client with `Configs`. Table names must be fully qualified as `database.table`; each entry is turned into an include regex for canal.
 
 ```go
