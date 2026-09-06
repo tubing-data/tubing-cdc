@@ -10,7 +10,71 @@
 
 Pass the same `[]string` you use for `Configs.Tables` so only registered tables are processed, or pass `nil`/empty to allow every table that appears in events.
 
-Implementation: `cdc_event_handler.go`, `cdc_dynamic_event_handler.go`, `event_envelope.go`, `row_event_sink.go`, `kafka_row_sink.go`, `elasticsearch_row_sink.go`, `elasticsearch_document_id.go`.
+Implementation: `cdc_event_handler.go`, `cdc_dynamic_event_handler.go`, `event_pipeline.go`, `event_envelope.go`, `row_event_sink.go`, `kafka_row_sink.go`, `elasticsearch_row_sink.go`, `elasticsearch_document_id.go`.
+
+## Functional event pipelines
+
+`WithPipeline` runs a composable, structured transformation after legacy field
+transform rules and before JSON serialization. A pipeline receives `Event`
+values with consistent row semantics:
+
+| Action | `Before` | `After` |
+|--------|----------|---------|
+| insert | nil | inserted row |
+| update | previous row | updated row |
+| delete | deleted row | nil |
+
+`Processor` returns a slice, so it can filter an event (zero results), map it
+(one result), or expand it (multiple results). Processors run synchronously and
+in order; the handler does not introduce hidden concurrency.
+
+```go
+pipeline := tubingcdc.Pipe(
+    tubingcdc.ForTable("mydb.orders",
+        tubingcdc.Map(func(event tubingcdc.Event) tubingcdc.Event {
+            event.After["status"] = strings.ToUpper(event.After["status"].(string))
+            delete(event.After, "internal_note")
+            return event
+        }),
+    ),
+    tubingcdc.Filter(func(event tubingcdc.Event) bool {
+        return event.Action != canal.InsertAction || event.After["status"] == "PAID"
+    }),
+    tubingcdc.Tap(func(event tubingcdc.Event) error {
+        metrics.Count(event.TableKey(), event.Action)
+        return nil
+    }),
+)
+
+h := tubingcdc.NewDynamicTableEventHandler(tables,
+    tubingcdc.WithPipeline(pipeline),
+    tubingcdc.WithRowEventSink(sink),
+    tubingcdc.WithDBLogEnvelope(true),
+)
+```
+
+The core combinators are `Pipe`, `Map`, `MapE`, `Filter`, `FlatMap`, `Tap`,
+`ForTable`, `ForAction`, and `When`. `MapE` and `FlatMap` receive a
+`context.Context` and can return errors.
+
+Pipeline errors are strict by default: `OnRow` returns the error and canal can
+stop rather than silently lose data. To explicitly report and skip a failed
+input event, configure a handler:
+
+```go
+h := tubingcdc.NewDynamicTableEventHandler(tables,
+    tubingcdc.WithPipeline(pipeline),
+    tubingcdc.WithPipelineErrorHandler(
+        tubingcdc.SkipPipelineError(func(ctx context.Context, event tubingcdc.Event, err error) error {
+            return deadLetter.Write(ctx, event, err)
+        }),
+    ),
+)
+```
+
+Rows are mutable maps. A processor may mutate the event it receives. A
+`FlatMap` implementation that needs independently mutable output events should
+copy their row maps before changing them.
 
 ## Row output sinks (`RowEventSink`)
 

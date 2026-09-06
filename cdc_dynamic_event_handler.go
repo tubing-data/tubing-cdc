@@ -1,6 +1,7 @@
 package tubing_cdc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -27,7 +28,9 @@ type DynamicTableEventHandler struct {
 	// useEnvelope wraps each row JSON in CDCEventEnvelope (P0 DBLog-aligned shape).
 	useEnvelope bool
 
-	fieldRules []RowFieldTransformRule
+	fieldRules      []RowFieldTransformRule
+	pipeline        Processor
+	onPipelineError PipelineErrorHandler
 
 	mu            sync.Mutex
 	rowLayout     map[string]rowColumnLayout
@@ -78,9 +81,25 @@ func WithRowFieldTransformRules(rules ...RowFieldTransformRule) DynamicHandlerOp
 	}
 }
 
-// NewDynamicTableEventHandler returns a handler that maps CDC rows into a per-table runtime
-// struct type. If registeredTables is empty, all tables seen in OnRow are handled; otherwise
-// only fully-qualified names "database.table" listed here are processed.
+// WithPipeline installs a structured event processor that runs after legacy
+// field transforms and before JSON/envelope serialization.
+func WithPipeline(processor Processor) DynamicHandlerOption {
+	return func(h *DynamicTableEventHandler) {
+		h.pipeline = processor
+	}
+}
+
+// WithPipelineErrorHandler configures processor error handling. The default is
+// StopOnPipelineError. A handler that returns nil skips the failed input event.
+func WithPipelineErrorHandler(handler PipelineErrorHandler) DynamicHandlerOption {
+	return func(h *DynamicTableEventHandler) {
+		h.onPipelineError = handler
+	}
+}
+
+// NewDynamicTableEventHandler returns a handler that maps CDC rows into structured row maps.
+// If registeredTables is empty, all tables seen in OnRow are handled; otherwise only
+// fully-qualified names "database.table" listed here are processed.
 func NewDynamicTableEventHandler(registeredTables []string, opts ...DynamicHandlerOption) *DynamicTableEventHandler {
 	allow := make(map[string]struct{}, len(registeredTables))
 	for _, t := range registeredTables {
@@ -100,6 +119,9 @@ func NewDynamicTableEventHandler(registeredTables []string, opts ...DynamicHandl
 	}
 	if h.sink == nil {
 		h.sink = LoggerRowSink{}
+	}
+	if h.onPipelineError == nil {
+		h.onPipelineError = StopOnPipelineError
 	}
 	return h
 }
@@ -142,14 +164,18 @@ func (h *DynamicTableEventHandler) OnRow(e *canal.RowsEvent) error {
 	switch e.Action {
 	case canal.UpdateAction:
 		for i := 0; i+1 < len(e.Rows); i += 2 {
-			h.logRowJSON(key, e.Action, e.Table, e, map[string]any{
+			if err := h.emitRow(key, e.Action, e.Table, e, map[string]any{
 				"before": rowValuesToMap(layout, e.Rows[i]),
 				"after":  rowValuesToMap(layout, e.Rows[i+1]),
-			})
+			}); err != nil {
+				return err
+			}
 		}
 	default:
 		for _, row := range e.Rows {
-			h.logRowJSON(key, e.Action, e.Table, e, rowValuesToMap(layout, row))
+			if err := h.emitRow(key, e.Action, e.Table, e, rowValuesToMap(layout, row)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -163,43 +189,108 @@ func (h *DynamicTableEventHandler) allows(key string) bool {
 	return ok
 }
 
-func (h *DynamicTableEventHandler) logRowJSON(tableKey, action string, tbl *schema.Table, ev *canal.RowsEvent, payload any) {
+func (h *DynamicTableEventHandler) emitRow(tableKey, action string, tbl *schema.Table, ev *canal.RowsEvent, payload any) error {
 	resolved := payload
-	var b []byte
-	var err error
-	if len(h.fieldRules) == 0 {
-		b, err = json.Marshal(payload)
-	} else {
+	if len(h.fieldRules) != 0 {
 		out, prepErr := h.applyFieldRulesToPayload(tableKey, action, payload)
 		if prepErr != nil {
-			log.Infof("[CDC] %s %s field transform error: %v payload=%#v", action, tableKey, prepErr, payload)
-			return
+			return fmt.Errorf("CDC %s %s field transform: %w", action, tableKey, prepErr)
 		}
 		resolved = out
-		b, err = json.Marshal(out)
 	}
+
+	event, err := eventFromResolvedPayload(tableKey, action, tbl, ev, resolved)
 	if err != nil {
-		log.Infof("[CDC] %s %s marshal error: %v payload=%#v", action, tableKey, err, payload)
-		return
+		return err
+	}
+	events := []Event{event}
+	if h.pipeline != nil {
+		events, err = h.pipeline(context.Background(), event)
+		if err != nil {
+			if handledErr := h.onPipelineError(context.Background(), event, err); handledErr != nil {
+				return fmt.Errorf("CDC %s %s pipeline: %w", action, tableKey, handledErr)
+			}
+			return nil
+		}
+	}
+	for _, output := range events {
+		if err := h.emitEvent(output); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func eventFromResolvedPayload(tableKey, action string, tbl *schema.Table, ev *canal.RowsEvent, payload any) (Event, error) {
+	id, err := ParseTableIdentity(tableKey)
+	if err != nil {
+		return Event{}, err
+	}
+	event := Event{SchemaVersion: DefaultEnvelopeSchemaVersion, Origin: OriginLog, Action: action, Table: id}
+	if ev != nil {
+		event.Position = BinlogPositionFromSources(nil, ev.Header)
+	}
+	if action == canal.UpdateAction {
+		if pair, ok := payload.(map[string]any); ok {
+			event.Before, _ = pair["before"].(map[string]any)
+			event.After, _ = pair["after"].(map[string]any)
+		}
+	} else if row, ok := payload.(map[string]any); ok {
+		if action == canal.DeleteAction {
+			event.Before = row
+		} else {
+			event.After = row
+		}
+	}
+	rowForPK := event.After
+	if rowForPK == nil {
+		rowForPK = event.Before
+	}
+	event.PrimaryKey = PrimaryKeyFromTableRow(tbl, rowForPK)
+	return event, nil
+}
+
+func (h *DynamicTableEventHandler) emitEvent(event Event) error {
+	payload := eventPayload(event)
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("CDC %s %s marshal: %w", event.Action, event.TableKey(), err)
 	}
 	if h.useEnvelope {
-		var hdr *replication.EventHeader
-		if ev != nil {
-			hdr = ev.Header
+		schemaVersion := event.SchemaVersion
+		if schemaVersion == "" {
+			schemaVersion = DefaultEnvelopeSchemaVersion
 		}
-		wrapped, werr := MarshalCDCEventEnvelope(DefaultEnvelopeSchemaVersion, OriginLog, action, tableKey, tbl, resolved, b, nil, hdr)
-		if werr != nil {
-			log.Infof("[CDC] %s %s envelope error: %v", action, tableKey, werr)
-			return
+		b, err = json.Marshal(CDCEventEnvelope{
+			SchemaVersion: schemaVersion,
+			Origin:        event.Origin,
+			Action:        event.Action,
+			Table:         event.Table,
+			PrimaryKey:    event.PrimaryKey,
+			Position:      event.Position,
+			Payload:       json.RawMessage(b),
+		})
+		if err != nil {
+			return fmt.Errorf("CDC %s %s envelope: %w", event.Action, event.TableKey(), err)
 		}
-		b = wrapped
 	}
 	if h.sink == nil {
 		h.sink = LoggerRowSink{}
 	}
-	if err := h.sink.Emit(tableKey, action, b); err != nil {
-		log.Infof("[CDC] %s %s sink error: %v", action, tableKey, err)
+	if err := h.sink.Emit(event.TableKey(), event.Action, b); err != nil {
+		return fmt.Errorf("CDC %s %s sink: %w", event.Action, event.TableKey(), err)
 	}
+	return nil
+}
+
+func eventPayload(event Event) any {
+	if event.Action == canal.UpdateAction {
+		return map[string]any{"before": event.Before, "after": event.After}
+	}
+	if event.Action == canal.DeleteAction {
+		return event.Before
+	}
+	return event.After
 }
 
 func (h *DynamicTableEventHandler) applyFieldRulesToPayload(tableKey, action string, payload any) (any, error) {
