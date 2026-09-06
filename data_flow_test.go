@@ -3,6 +3,7 @@ package tubing_cdc
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTableIncludeRegex(t *testing.T) {
@@ -38,6 +39,60 @@ func TestTableIncludeRegex(t *testing.T) {
 	}
 }
 
+func TestFullSyncConfigValidate(t *testing.T) {
+	base := &Configs{
+		Tables:                   []string{"db.one"},
+		Watermark:                &WatermarkTableConfig{TableKey: "db.watermark"},
+		ChunkProgressPersistence: &ChunkProgressPersistence{BadgerDir: t.TempDir()},
+	}
+	valid := &FullSyncConfig{
+		Tables:  []FullStateTableSpec{{TableKey: "db.one", PKColumns: []string{"id"}, ChunkSize: 100}},
+		RowSink: LoggerRowSink{},
+	}
+	if err := valid.validate(base); err != nil {
+		t.Fatalf("valid config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		cfg  Configs
+		fs   FullSyncConfig
+		want string
+	}{
+		{name: "watermark required", cfg: Configs{ChunkProgressPersistence: base.ChunkProgressPersistence}, fs: *valid, want: "Watermark"},
+		{name: "progress required", cfg: Configs{Watermark: base.Watermark}, fs: *valid, want: "ChunkProgressPersistence"},
+		{name: "sink required", cfg: *base, fs: FullSyncConfig{Tables: valid.Tables}, want: "RowSink"},
+		{name: "tables required", cfg: *base, fs: FullSyncConfig{RowSink: LoggerRowSink{}}, want: "no tables"},
+		{name: "duplicate", cfg: *base, fs: FullSyncConfig{RowSink: LoggerRowSink{}, Tables: append(valid.Tables, valid.Tables[0])}, want: "duplicate"},
+		{name: "table not replicated", cfg: *base, fs: FullSyncConfig{RowSink: LoggerRowSink{}, Tables: []FullStateTableSpec{{TableKey: "db.two", PKColumns: []string{"id"}, ChunkSize: 1}}}, want: "Configs.Tables"},
+		{name: "low level conflict", cfg: Configs{Watermark: base.Watermark, ChunkProgressPersistence: base.ChunkProgressPersistence, Algorithm1: &Algorithm1Config{}}, fs: *valid, want: "cannot be combined"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.fs.validate(&tt.cfg); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("got %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestFullSyncDone(t *testing.T) {
+	var nilCDC *TubingCDC
+	if nilCDC.FullSyncDone() != nil {
+		t.Fatal("nil receiver should have no completion channel")
+	}
+	done := make(chan error, 1)
+	cdc := &TubingCDC{fullSync: &fullSyncRuntime{done: done}}
+	if cdc.FullSyncDone() != done {
+		t.Fatal("completion channel mismatch")
+	}
+	select {
+	case <-done:
+		t.Fatal("completion channel should not be ready")
+	case <-time.After(time.Millisecond):
+	}
+}
+
 func TestNewTubingCDC_chunkProgressInvalidConfig(t *testing.T) {
 	_, err := NewTubingCDC(&Configs{
 		Address:                  "127.0.0.1:3306",
@@ -53,8 +108,8 @@ func TestNewTubingCDC_chunkProgressInvalidConfig(t *testing.T) {
 
 func TestNewTubingCDC_positionPersistenceEmptyBadgerDir(t *testing.T) {
 	_, err := NewTubingCDC(&Configs{
-		Address:               "127.0.0.1:3306",
-		PositionPersistence:   &PositionPersistence{BadgerDir: ""},
+		Address:             "127.0.0.1:3306",
+		PositionPersistence: &PositionPersistence{BadgerDir: ""},
 	})
 	if err == nil {
 		t.Fatal("expected error for empty position BadgerDir")

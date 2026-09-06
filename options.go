@@ -62,9 +62,67 @@ type Configs struct {
 	ChunkProcessingControl *ChunkProcessingControl
 	// FullStateJobQueue (P4) is optional; when set, TubingCDC exposes a FIFO for PlanFullStateJobs output.
 	FullStateJobQueue *FullStateJobQueue
+	// FullSync enables a DBLog-style, watermarked full snapshot when Run or RunFrom starts.
+	// The binlog stream remains active after the snapshot finishes. Watermark and
+	// ChunkProgressPersistence are required. FullSync cannot be combined with the
+	// lower-level Algorithm1 or FullStateJobQueue configuration.
+	FullSync *FullSyncConfig
 	// LeaderElection (P5 / DBLog HA) configures Redis-backed leader election. Use
 	// RunTubingCDCWithLeaderElection or AcquireRedisLeaderSession; nil means single-process Run only.
 	LeaderElection *LeaderElectionConfig
+}
+
+// FullSyncConfig configures the automatic startup snapshot. Tables are processed
+// sequentially in primary-key order, one watermark window per chunk.
+type FullSyncConfig struct {
+	Tables      []FullStateTableSpec
+	RowSink     RowEventSink
+	UseEnvelope bool
+	// Resume keeps existing chunk cursors. The default false starts a fresh full
+	// snapshot on every process start by deleting cursors for the configured RunIDs.
+	Resume           bool
+	PhaseWaitTimeout time.Duration
+	ErrorPolicy      Algorithm1DriverErrorPolicy
+}
+
+func (c *FullSyncConfig) validate(cfg *Configs) error {
+	if c == nil {
+		return fmt.Errorf("full-sync: config is nil")
+	}
+	if cfg.Watermark == nil {
+		return fmt.Errorf("full-sync: Watermark is required")
+	}
+	if cfg.ChunkProgressPersistence == nil {
+		return fmt.Errorf("full-sync: ChunkProgressPersistence is required")
+	}
+	if cfg.Algorithm1 != nil || cfg.FullStateJobQueue != nil {
+		return fmt.Errorf("full-sync: cannot be combined with Algorithm1 or FullStateJobQueue")
+	}
+	if c.RowSink == nil {
+		return fmt.Errorf("full-sync: RowSink is nil")
+	}
+	if len(c.Tables) == 0 {
+		return fmt.Errorf("full-sync: no tables configured")
+	}
+	seen := make(map[string]struct{}, len(c.Tables))
+	replicated := make(map[string]struct{}, len(cfg.Tables))
+	for _, table := range cfg.Tables {
+		replicated[strings.TrimSpace(table)] = struct{}{}
+	}
+	for _, table := range c.Tables {
+		if err := table.Validate(); err != nil {
+			return fmt.Errorf("full-sync: %w", err)
+		}
+		key := strings.TrimSpace(table.TableKey)
+		if _, ok := seen[key]; ok {
+			return fmt.Errorf("full-sync: duplicate table %q", key)
+		}
+		if _, ok := replicated[key]; !ok {
+			return fmt.Errorf("full-sync: table %q is not present in Configs.Tables", key)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
 }
 
 // Algorithm1Config binds a shared Algorithm1Tracker to the table whose chunked snapshots are reconciled.

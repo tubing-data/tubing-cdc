@@ -1,6 +1,6 @@
 # Quick start: MySQL CDC to Elasticsearch
 
-This walkthrough starts a binlog-enabled MySQL, Elasticsearch, and a containerized tubing-cdc example. A sample processing pipeline normalizes `status`, extracts `email_domain`, builds `search_text`, and sends the resulting row to Elasticsearch. The sink uses `StoreLatestEntity`, so each index document represents the latest source row rather than CDC history.
+This walkthrough starts a binlog-enabled MySQL, Elasticsearch, and a containerized tubing-cdc example. On startup the example runs a DBLog-style full sync of existing `orders`, then keeps consuming incremental binlog changes. A sample processing pipeline normalizes `status`, extracts `email_domain`, builds `search_text`, and sends the resulting row to Elasticsearch. The sink uses `StoreLatestEntity`, so each index document represents the latest source row rather than CDC history.
 
 ## Requirements
 
@@ -97,6 +97,8 @@ MySQL orders row -> row binlog -> DynamicTableEventHandler
                   -> cdc-orders/_doc/{MySQL id}
 ```
 
+The MySQL image creates and seeds `cdc_test.cdc_watermark`. While FullSync reads a chunk, inserts, updates, and deletes continue through the binlog path. If a primary key changes between the chunk's low and high watermarks, the older snapshot row is discarded and the incremental event wins. The example applies the same `processRow` transformation to both paths.
+
 ## Useful commands
 
 | Command | Purpose |
@@ -112,6 +114,6 @@ MySQL orders row -> row binlog -> DynamicTableEventHandler
 | `make test` | Run all Go tests |
 | `make check` | Run vet and the repository test suite |
 
-The example application is in `cmd/quickstart/main.go`. Its connection settings can be overridden with `MYSQL_ADDRESS`, `MYSQL_USERNAME`, `MYSQL_PASSWORD`, `ELASTICSEARCH_URL`, and `ELASTICSEARCH_INDEX` when running the binary outside Compose.
+The example application is in `cmd/quickstart/main.go`. Its connection settings can be overridden with `MYSQL_ADDRESS`, `MYSQL_USERNAME`, `MYSQL_PASSWORD`, `ELASTICSEARCH_URL`, `ELASTICSEARCH_INDEX`, and `FULL_SYNC_STATE_DIR` when running the binary outside Compose.
 
 If a service does not become healthy, inspect `docker compose ps` and `docker compose logs mysql elasticsearch quickstart-cdc`. Running `make down` resets the initialized database and Elasticsearch data.

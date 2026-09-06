@@ -19,10 +19,20 @@ type TubingCDC struct {
 	sharedBadger *badger.DB
 	chunkControl *ChunkProcessingControl
 	fullStateQ   *FullStateJobQueue
+	fullSync     *fullSyncRuntime
 
 	drvMu            sync.Mutex
 	algoDriverCancel context.CancelFunc
 	algoDriverWG     sync.WaitGroup
+}
+
+type fullSyncRuntime struct {
+	cfg       FullSyncConfig
+	watermark *WatermarkTableConfig
+	tracker   *Algorithm1Tracker
+	queue     *FullStateJobQueue
+	done      chan error
+	started   bool
 }
 
 func NewTubingCDC(cfg *Configs) (*TubingCDC, error) {
@@ -34,6 +44,11 @@ func NewTubingCDC(cfg *Configs) (*TubingCDC, error) {
 	}
 	if cfg.ChunkProgressPersistence != nil {
 		if err := cfg.ChunkProgressPersistence.validate(); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.FullSync != nil {
+		if err := cfg.FullSync.validate(cfg); err != nil {
 			return nil, err
 		}
 	}
@@ -82,8 +97,17 @@ func NewTubingCDC(cfg *Configs) (*TubingCDC, error) {
 		handler = &MyEventHandler{}
 	}
 
-	if cfg.Watermark != nil && cfg.WatermarkNotifier != nil {
-		handler = wrapHandlerWithWatermark(handler, cfg.Watermark, cfg.WatermarkNotifier, cfg.ForwardWatermarkRowsToEventHandler)
+	var fullSync *fullSyncRuntime
+	watermarkNotifier := cfg.WatermarkNotifier
+	if cfg.FullSync != nil {
+		tracker := NewAlgorithm1Tracker()
+		queue := NewFullStateJobQueue()
+		fullSync = &fullSyncRuntime{cfg: *cfg.FullSync, watermark: cfg.Watermark, tracker: tracker, queue: queue, done: make(chan error, 1)}
+		watermarkNotifier = ChainWatermarkNotifiers(tracker.OnWatermark, watermarkNotifier)
+		handler = wrapHandlerWithAlgorithm1(handler, tracker, "")
+	}
+	if cfg.Watermark != nil && watermarkNotifier != nil {
+		handler = wrapHandlerWithWatermark(handler, cfg.Watermark, watermarkNotifier, cfg.ForwardWatermarkRowsToEventHandler)
 	}
 
 	if cfg.Algorithm1 != nil {
@@ -169,6 +193,7 @@ func NewTubingCDC(cfg *Configs) (*TubingCDC, error) {
 		sharedBadger: sharedDB,
 		chunkControl: cfg.ChunkProcessingControl,
 		fullStateQ:   cfg.FullStateJobQueue,
+		fullSync:     fullSync,
 	}, nil
 }
 
@@ -181,11 +206,62 @@ func tableIncludeRegex(dbTable string) (string, error) {
 }
 
 func (t *TubingCDC) Run() error {
+	if t != nil && t.fullSync != nil {
+		pos, err := t.river.GetMasterPos()
+		if err != nil {
+			return err
+		}
+		return t.runFromWithFullSync(pos)
+	}
 	return t.river.Run()
 }
 
 func (t *TubingCDC) RunFrom(pos mysql.Position) error {
+	if t != nil && t.fullSync != nil {
+		return t.runFromWithFullSync(pos)
+	}
 	return t.river.RunFrom(pos)
+}
+
+func (t *TubingCDC) runFromWithFullSync(pos mysql.Position) error {
+	fs := t.fullSync
+	if fs.started {
+		return fmt.Errorf("full-sync: startup snapshot already started")
+	}
+	fs.started = true
+	jobs, err := PlanFullStateJobs(&FullStateCaptureConfig{Tables: fs.cfg.Tables}, PlanFullStateJobsOptions{Mode: PlanFullStateAllTables})
+	if err != nil {
+		return err
+	}
+	if !fs.cfg.Resume {
+		for _, job := range jobs {
+			if err := t.chunkStore.Delete(job.Spec.TableKey, job.Spec.RunID); err != nil {
+				return fmt.Errorf("full-sync: reset progress for %s: %w", job.Spec.TableKey, err)
+			}
+		}
+	}
+	fs.queue.Enqueue(jobs...)
+	err = t.StartAlgorithm1ChunkDriver(context.Background(), Algorithm1ChunkDriverConfig{
+		Watermark: fs.watermark, Tracker: fs.tracker, RowSink: fs.cfg.RowSink,
+		UseEnvelope: fs.cfg.UseEnvelope, JobQueue: fs.queue, ChunkStore: t.chunkStore,
+		Control: t.chunkControl, PhaseWaitTimeout: fs.cfg.PhaseWaitTimeout,
+		ErrorPolicy: fs.cfg.ErrorPolicy, stopWhenQueueEmpty: true, done: fs.done,
+	})
+	if err != nil {
+		return err
+	}
+	err = t.river.RunFrom(pos)
+	t.StopAlgorithm1ChunkDriver()
+	return err
+}
+
+// FullSyncDone reports completion of the automatic startup snapshot. The binlog
+// stream continues after a nil result. It returns nil when FullSync is disabled.
+func (t *TubingCDC) FullSyncDone() <-chan error {
+	if t == nil || t.fullSync == nil {
+		return nil
+	}
+	return t.fullSync.done
 }
 
 // Canal returns the underlying go-mysql canal for advanced use (e.g. WatermarkUpdateValueSQL + Execute
