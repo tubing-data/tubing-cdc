@@ -26,6 +26,7 @@ type ElasticsearchRowEventSink struct {
 	basicUser     string
 	basicPass     string
 	apiKey        string
+	latestEntity  bool
 }
 
 // ElasticsearchSinkConfig holds cluster address and index routing for NewElasticsearchRowEventSink.
@@ -35,16 +36,19 @@ type ElasticsearchSinkConfig struct {
 	Index string
 	// IndexResolver, when set, maps fully-qualified table key "db.table" to an index name (sanitized).
 	IndexResolver func(tableKey string) string
-	Username string
-	Password string
+	Username      string
+	Password      string
 	// APIKey is sent as Authorization: ApiKey <value> (Elastic Cloud style). Ignored if empty.
 	APIKey string
 	// Refresh is passed as the refresh query parameter when non-empty (e.g. "true", "wait_for").
-	Refresh string
+	Refresh    string
 	HTTPClient *http.Client
 	// DocumentID overrides default id extraction from payloadJSON. Use JoinElasticsearchDocumentID to build
 	// an id from literals, JSON field paths (e.g. "after.id"), table key, and action.
 	DocumentID func(tableKey, action string, payloadJSON []byte) (string, bool)
+	// StoreLatestEntity makes the index a current-state view: inserts store the row, updates store only
+	// the "after" row, and deletes remove the document. The default false stores the complete CDC payload.
+	StoreLatestEntity bool
 }
 
 // NewElasticsearchRowEventSink builds a sink. Only the first entry in Addresses is used. Callers should
@@ -78,6 +82,7 @@ func NewElasticsearchRowEventSink(cfg ElasticsearchSinkConfig) (*ElasticsearchRo
 		basicUser:     cfg.Username,
 		basicPass:     cfg.Password,
 		apiKey:        strings.TrimSpace(cfg.APIKey),
+		latestEntity:  cfg.StoreLatestEntity,
 	}, nil
 }
 
@@ -230,6 +235,13 @@ func (s *ElasticsearchRowEventSink) Emit(tableKey, action string, payloadJSON []
 		return s.doElasticsearchRequest(req)
 	}
 
+	var err error
+	if s.latestEntity {
+		payloadJSON, err = latestEntityPayload(action, payloadJSON)
+		if err != nil {
+			return err
+		}
+	}
 	body, err := elasticsearchEnvelopeJSON(tableKey, action, payloadJSON)
 	if err != nil {
 		return err
@@ -250,6 +262,22 @@ func (s *ElasticsearchRowEventSink) Emit(tableKey, action string, payloadJSON []
 	s.applyAuth(req)
 	req.Header.Set("Content-Type", "application/json")
 	return s.doElasticsearchRequest(req)
+}
+
+func latestEntityPayload(action string, payloadJSON []byte) ([]byte, error) {
+	if action != "update" {
+		return payloadJSON, nil
+	}
+	var update struct {
+		After json.RawMessage `json:"after"`
+	}
+	if err := json.Unmarshal(payloadJSON, &update); err != nil {
+		return nil, fmt.Errorf("elasticsearch sink: decode update payload: %w", err)
+	}
+	if len(update.After) == 0 || string(update.After) == "null" {
+		return nil, fmt.Errorf("elasticsearch sink: latest entity update requires after row")
+	}
+	return update.After, nil
 }
 
 func (s *ElasticsearchRowEventSink) doElasticsearchRequest(req *http.Request) error {

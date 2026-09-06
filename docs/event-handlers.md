@@ -85,7 +85,7 @@ By default, row JSON goes to **`LoggerRowSink`** (same `[CDC] action table …` 
 | **`LoggerRowSink`** | Default when no option is passed; uses structured log lines. |
 | **`StdoutRowSink`** | Writes one line per event to an `io.Writer` (defaults to `os.Stdout`). Optional: set `Writer` to a file or buffer. |
 | **`KafkaRowEventSink`** | Publishes each event to Kafka (`segmentio/kafka-go`): message **key** = fully qualified table name, **value** = JSON payload, header **`cdc_action`** = canal action. Call **`Close()`** on shutdown. |
-| **`ElasticsearchRowEventSink`** | Indexes each row via the Elasticsearch HTTP API (`PUT`/`POST`/`DELETE` …`/_doc`). Configure cluster **`Addresses`** (first entry is used), **`Index`** or **`IndexResolver`**, optional **`DocumentID`** (see **`JoinElasticsearchDocumentID`**), **`Refresh`**, **`Username`**/**`Password`**, or **`APIKey`**. For a local cluster, run **`docker compose up -d elasticsearch`** (see [development.md](development.md)). |
+| **`ElasticsearchRowEventSink`** | Indexes each row via the Elasticsearch HTTP API (`PUT`/`POST`/`DELETE` …`/_doc`). Configure cluster **`Addresses`** (first entry is used), **`Index`** or **`IndexResolver`**, optional **`DocumentID`** (see **`JoinElasticsearchDocumentID`**), **`StoreLatestEntity`**, **`Refresh`**, **`Username`**/**`Password`**, or **`APIKey`**. For a local cluster, run **`docker compose up -d elasticsearch`** (see [development.md](development.md)). |
 
 Implement **`RowEventSink`** yourself (`Emit(tableKey, action string, payloadJSON []byte) error`) for other systems (HTTP, Pulsar, etc.). With **`WithDBLogEnvelope(true)`**, `payloadJSON` is the **full envelope object**; `tableKey` and `action` are still passed the same way (for example Kafka still sets key and `cdc_action` header from them).
 
@@ -131,6 +131,7 @@ Elasticsearch (local Compose endpoint):
 es, err := tubingcdc.NewElasticsearchRowEventSink(tubingcdc.ElasticsearchSinkConfig{
     Addresses: []string{"http://localhost:9200"},
     Index:     "cdc_rows",
+	StoreLatestEntity: true, // UPDATE stores only after; DELETE removes the entity.
 })
 if err != nil {
     // handle error

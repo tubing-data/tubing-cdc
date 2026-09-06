@@ -8,6 +8,12 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: cdc_test
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
 
   # Local Elasticsearch for manual runs and integration-style tests against http://localhost:9200
   elasticsearch:
@@ -26,3 +32,20 @@ services:
       timeout: 5s
       retries: 12
       start_period: 60s
+
+  quickstart-cdc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      MYSQL_ADDRESS: mysql:3306
+      MYSQL_USERNAME: cdc
+      MYSQL_PASSWORD: cdc_pass
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ELASTICSEARCH_INDEX: cdc-orders
+    depends_on:
+      mysql:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
