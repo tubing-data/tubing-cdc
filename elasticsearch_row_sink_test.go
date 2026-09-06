@@ -268,6 +268,45 @@ func TestElasticsearchRowEventSink_Emit_refreshQuery(t *testing.T) {
 	}
 }
 
+func TestElasticsearchRowEventSink_Emit_latestEntityUpdate(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	sink, err := NewElasticsearchRowEventSink(ElasticsearchSinkConfig{
+		Addresses:         []string{srv.URL},
+		Index:             "entities",
+		StoreLatestEntity: true,
+		HTTPClient:        srv.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Emit("db.orders", "update", []byte(`{"before":{"id":1,"status":"pending"},"after":{"id":1,"status":"paid"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(gotBody, &document); err != nil {
+		t.Fatal(err)
+	}
+	if document.Data["status"] != "paid" || document.Data["id"] != float64(1) {
+		t.Fatalf("unexpected latest entity: %#v", document.Data)
+	}
+	if _, exists := document.Data["before"]; exists {
+		t.Fatalf("latest entity must not contain before: %#v", document.Data)
+	}
+}
+
+func TestLatestEntityPayload_updateRequiresAfter(t *testing.T) {
+	if _, err := latestEntityPayload("update", []byte(`{"before":{"id":1}}`)); err == nil {
+		t.Fatal("expected missing after error")
+	}
+}
+
 func TestElasticsearchRowEventSink_Emit_apiKeyAuth(t *testing.T) {
 	var auth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

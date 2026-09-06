@@ -129,6 +129,18 @@ Every configured table must use the fully qualified `database.table` form.
 
 ## Quick start
 
+For a complete MySQL binlog -> event processing -> Elasticsearch flow, use the Docker quick start:
+
+```bash
+make demo
+```
+
+This builds the included application image, starts MySQL and Elasticsearch, writes a sample order, and prints the indexed document. See [Quick start: MySQL CDC to Elasticsearch](docs/quick-start.md) for insert, update, delete, verification, troubleshooting, and all shortcut commands.
+
+For an interactive walkthrough, run `make interactive`, enter your own SQL, and inspect the original `before`/`after` event, processed event, and Elasticsearch result after every change.
+
+To embed tubing-cdc in your own Go application:
+
 ```go
 package main
 
