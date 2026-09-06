@@ -20,9 +20,6 @@ func wrapHandlerWithAlgorithm1(inner canal.EventHandler, tracker *Algorithm1Trac
 		return inner
 	}
 	tk := strings.TrimSpace(targetTableKey)
-	if tk == "" {
-		return inner
-	}
 	return &algorithm1HandlerWrapper{
 		inner:          inner,
 		tracker:        tracker,
@@ -45,7 +42,7 @@ func (w *algorithm1HandlerWrapper) OnDDL(header *replication.EventHeader, nextPo
 func (w *algorithm1HandlerWrapper) OnRow(e *canal.RowsEvent) error {
 	if e != nil && e.Table != nil {
 		tk := tableFQN(e.Table.Schema, e.Table.Name)
-		if tk == w.targetTableKey {
+		if w.targetTableKey == "" || tk == w.targetTableKey {
 			w.recordRowEvent(e)
 		}
 	}
@@ -76,21 +73,22 @@ func (w *algorithm1HandlerWrapper) recordRowEvent(e *canal.RowsEvent) {
 			return
 		}
 		m := rowMapFromCanalRow(tbl, e.Rows[0])
-		w.tracker.RecordTargetRowChange(w.targetTableKey, m)
+		w.tracker.RecordTargetRowChange(tableFQN(tbl.Schema, tbl.Name), m)
 	case canal.DeleteAction:
 		if len(e.Rows) < 1 {
 			return
 		}
 		m := rowMapFromCanalRow(tbl, e.Rows[0])
-		w.tracker.RecordTargetRowChange(w.targetTableKey, m)
+		w.tracker.RecordTargetRowChange(tableFQN(tbl.Schema, tbl.Name), m)
 	case canal.UpdateAction:
 		if len(e.Rows) < 2 {
 			return
 		}
 		before := rowMapFromCanalRow(tbl, e.Rows[0])
 		after := rowMapFromCanalRow(tbl, e.Rows[1])
-		w.tracker.RecordTargetRowChange(w.targetTableKey, before)
-		w.tracker.RecordTargetRowChange(w.targetTableKey, after)
+		tk := tableFQN(tbl.Schema, tbl.Name)
+		w.tracker.RecordTargetRowChange(tk, before)
+		w.tracker.RecordTargetRowChange(tk, after)
 	default:
 		return
 	}

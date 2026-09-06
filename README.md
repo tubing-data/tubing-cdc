@@ -135,7 +135,7 @@ For a complete MySQL binlog -> event processing -> Elasticsearch flow, use the D
 make demo
 ```
 
-This builds the included application image, starts MySQL and Elasticsearch, writes a sample order, and prints the indexed document. See [Quick start: MySQL CDC to Elasticsearch](docs/quick-start.md) for insert, update, delete, verification, troubleshooting, and all shortcut commands.
+This builds the included application image, starts MySQL and Elasticsearch, performs a DBLog-style startup full sync of any existing orders, writes a sample order, and prints the indexed document. Changes made while the full sync is running continue through the binlog path; rows whose primary keys changed inside a snapshot watermark window are removed from that snapshot chunk so the incremental value wins. See [Quick start: MySQL CDC to Elasticsearch](docs/quick-start.md) for insert, update, delete, verification, troubleshooting, and all shortcut commands.
 
 For an interactive walkthrough, run `make interactive`, enter your own SQL, and inspect the original `before`/`after` event, processed event, and Elasticsearch result after every change.
 
@@ -245,6 +245,35 @@ The repository includes composable support for the watermark-based algorithm des
 5. Redis-backed leader election
 
 These pieces are opt-in and require explicit orchestration and configuration. Start with the [Algorithm 1 chunk driver guide](docs/algorithm1-chunk-driver.md), then review the [architecture](docs/architecture.md) and [correctness coverage](docs/coverage-vs-dblog.md).
+
+For the common bootstrap case, `Configs.FullSync` performs the orchestration automatically. `Run` first anchors a binlog position, then snapshots every configured table in PK-ordered chunks while the binlog is consumed, and finally keeps tailing the binlog:
+
+```go
+cfg.Watermark = &tubingcdc.WatermarkTableConfig{TableKey: "app.cdc_watermark"}
+cfg.ChunkProgressPersistence = &tubingcdc.ChunkProgressPersistence{BadgerDir: "./cdc-state"}
+cfg.FullSync = &tubingcdc.FullSyncConfig{
+	Tables: []tubingcdc.FullStateTableSpec{
+		{TableKey: "app.users", PKColumns: []string{"id"}, ChunkSize: 1000},
+		{TableKey: "app.orders", PKColumns: []string{"id"}, ChunkSize: 1000},
+	},
+	RowSink:     sink, // normally the same sink used by the binlog handler
+	UseEnvelope: true,
+}
+
+go func() {
+	if err := <-cdc.FullSyncDone(); err != nil {
+		log.Printf("full sync failed: %v", err)
+	}
+}()
+
+if err := cdc.Run(); err != nil {
+	log.Fatal(err)
+}
+```
+
+The default starts a fresh snapshot on each process start. Set `FullSync.Resume` to retain an incomplete cursor across restarts. The watermark table must already exist and its singleton row must be seeded using `WatermarkCreateTableSQL`.
+
+During FullSync, binlog consumption is not stopped. For each chunk, changes between its low and high watermarks are emitted normally through the incremental handler and their primary keys are recorded. Conflicting rows are then removed from the snapshot output, so an older snapshot value cannot overwrite an update or resurrect a delete observed in that window. Use an idempotent, primary-key-based sink; if the incremental handler applies transformations, apply the same transformations to the FullSync sink as demonstrated by `cmd/quickstart`.
 
 ## Multiple MySQL sources
 

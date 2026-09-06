@@ -1,5 +1,11 @@
 # Algorithm 1 chunk driver (built-in goroutine)
 
+## Automatic startup full sync
+
+Set `Configs.FullSync` to run a complete snapshot automatically from `Run` or `RunFrom`. This mode creates the tracker and job queue internally, accepts multiple tables, runs them sequentially, and leaves binlog CDC running after the finite snapshot queue completes. Observe the result through `TubingCDC.FullSyncDone()`.
+
+`Watermark`, `ChunkProgressPersistence`, a `RowSink`, and at least one valid `FullStateTableSpec` are required. Do not also set the lower-level `Algorithm1` or `FullStateJobQueue` fields. By default old cursors are cleared so each application start performs a fresh full sync; `FullSync.Resume` retains cursors for restart recovery.
+
 `TubingCDC.StartAlgorithm1ChunkDriver` runs a background loop that:
 
 1. Dequeues `FullStateJob` values from the configured `FullStateJobQueue`.

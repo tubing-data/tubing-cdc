@@ -13,6 +13,7 @@ import (
 )
 
 const tableKey = "cdc_test.orders"
+const watermarkTableKey = "cdc_test.cdc_watermark"
 
 func main() {
 	esSink, err := tubingcdc.NewElasticsearchRowEventSink(tubingcdc.ElasticsearchSinkConfig{
@@ -42,12 +43,27 @@ func main() {
 			}),
 		)),
 	)
+	snapshotSink := &processingSnapshotSink{next: esSink}
 
 	cdc, err := tubingcdc.NewTubingCDC(&tubingcdc.Configs{
-		Address:      env("MYSQL_ADDRESS", "mysql:3306"),
-		Username:     env("MYSQL_USERNAME", "cdc"),
-		Password:     env("MYSQL_PASSWORD", "cdc_pass"),
-		Tables:       []string{tableKey},
+		Address:  env("MYSQL_ADDRESS", "mysql:3306"),
+		Username: env("MYSQL_USERNAME", "cdc"),
+		Password: env("MYSQL_PASSWORD", "cdc_pass"),
+		Tables:   []string{tableKey},
+		Watermark: &tubingcdc.WatermarkTableConfig{
+			TableKey: watermarkTableKey,
+		},
+		ChunkProgressPersistence: &tubingcdc.ChunkProgressPersistence{
+			BadgerDir: env("FULL_SYNC_STATE_DIR", "/tmp/tubing-cdc-full-sync"),
+		},
+		FullSync: &tubingcdc.FullSyncConfig{
+			Tables: []tubingcdc.FullStateTableSpec{{
+				TableKey:  tableKey,
+				PKColumns: []string{"id"},
+				ChunkSize: 1000,
+			}},
+			RowSink: snapshotSink,
+		},
 		EventHandler: handler,
 	})
 	if err != nil {
@@ -61,6 +77,13 @@ func main() {
 	go func() {
 		runErr <- cdc.Run()
 	}()
+	go func() {
+		if err := <-cdc.FullSyncDone(); err != nil {
+			log.Printf("startup full sync failed: %v", err)
+			return
+		}
+		log.Printf("startup full sync complete: %s", tableKey)
+	}()
 
 	log.Printf("quickstart CDC running: %s -> %s/%s", tableKey, env("ELASTICSEARCH_URL", "http://elasticsearch:9200"), env("ELASTICSEARCH_INDEX", "cdc-orders"))
 	select {
@@ -73,6 +96,25 @@ func main() {
 		cdc.Close()
 		<-runErr
 	}
+}
+
+// processingSnapshotSink keeps startup snapshot documents identical to the
+// transformed documents emitted by the incremental event pipeline.
+type processingSnapshotSink struct {
+	next tubingcdc.RowEventSink
+}
+
+func (s *processingSnapshotSink) Emit(tableKey, action string, payloadJSON []byte) error {
+	var row tubingcdc.Row
+	if err := json.Unmarshal(payloadJSON, &row); err != nil {
+		return fmt.Errorf("decode snapshot row: %w", err)
+	}
+	processRow(row)
+	processed, err := json.Marshal(row)
+	if err != nil {
+		return fmt.Errorf("encode snapshot row: %w", err)
+	}
+	return s.next.Emit(tableKey, action, processed)
 }
 
 func logEvent(stage string, event tubingcdc.Event) error {

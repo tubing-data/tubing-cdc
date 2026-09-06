@@ -43,6 +43,7 @@ services:
       MYSQL_PASSWORD: cdc_pass
       ELASTICSEARCH_URL: http://elasticsearch:9200
       ELASTICSEARCH_INDEX: cdc-orders
+      FULL_SYNC_STATE_DIR: /tmp/tubing-cdc-full-sync
     depends_on:
       mysql:
         condition: service_healthy

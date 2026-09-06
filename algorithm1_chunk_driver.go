@@ -42,6 +42,9 @@ type Algorithm1ChunkDriverConfig struct {
 	// PhaseWaitTimeout bounds how long we poll tracker phase after each watermark Execute. Zero defaults to 60s.
 	PhaseWaitTimeout time.Duration
 	ErrorPolicy      Algorithm1DriverErrorPolicy
+	// internal finite-queue mode used by automatic startup full sync.
+	stopWhenQueueEmpty bool
+	done               chan error
 }
 
 func (c Algorithm1ChunkDriverConfig) validate() error {
@@ -55,11 +58,13 @@ func (c Algorithm1ChunkDriverConfig) validate() error {
 		return fmt.Errorf("algorithm1 driver: Tracker is nil")
 	}
 	tk := strings.TrimSpace(c.TargetTableKey)
-	if tk == "" {
+	if tk == "" && !c.stopWhenQueueEmpty {
 		return fmt.Errorf("algorithm1 driver: TargetTableKey is empty")
 	}
-	if _, err := ParseTableIdentity(tk); err != nil {
-		return fmt.Errorf("algorithm1 driver: %w", err)
+	if tk != "" {
+		if _, err := ParseTableIdentity(tk); err != nil {
+			return fmt.Errorf("algorithm1 driver: %w", err)
+		}
 	}
 	if c.RowSink == nil {
 		return fmt.Errorf("algorithm1 driver: RowSink is nil")
@@ -93,6 +98,16 @@ func newAlgorithm1ChunkDriver(cnl *canal.Canal, cfg Algorithm1ChunkDriverConfig,
 }
 
 func (d *algorithm1ChunkDriver) run(ctx context.Context) {
+	var result error
+	defer func() {
+		if d.cfg.done != nil {
+			if result == nil && ctx.Err() != nil {
+				result = ctx.Err()
+			}
+			d.cfg.done <- result
+			close(d.cfg.done)
+		}
+	}()
 	target := strings.TrimSpace(d.cfg.TargetTableKey)
 	for {
 		if d.cfg.Control != nil {
@@ -102,6 +117,9 @@ func (d *algorithm1ChunkDriver) run(ctx context.Context) {
 		}
 		job, ok := d.cfg.JobQueue.TryDequeue()
 		if !ok {
+			if d.cfg.stopWhenQueueEmpty {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -109,8 +127,12 @@ func (d *algorithm1ChunkDriver) run(ctx context.Context) {
 				continue
 			}
 		}
-		if strings.TrimSpace(job.Spec.TableKey) != target {
+		if target != "" && strings.TrimSpace(job.Spec.TableKey) != target {
 			d.handleErr(fmt.Errorf("algorithm1 driver: job table %q != target %q", job.Spec.TableKey, target))
+			if d.cfg.ErrorPolicy == Algorithm1DriverStopOnError {
+				result = fmt.Errorf("algorithm1 driver: job table %q != target %q", job.Spec.TableKey, target)
+				return
+			}
 			continue
 		}
 		var err error
@@ -124,6 +146,10 @@ func (d *algorithm1ChunkDriver) run(ctx context.Context) {
 		}
 		if err != nil {
 			d.handleErr(err)
+			if d.cfg.ErrorPolicy == Algorithm1DriverStopOnError {
+				result = err
+				return
+			}
 		}
 	}
 }
