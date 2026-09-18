@@ -10,7 +10,7 @@ Full citation: [references.md](references.md).
 
 ## Current phase
 
-The code today is **phase 1**: a MySQL **binlog-only** pipeline—[go-mysql canal](https://github.com/go-mysql-org/go-mysql), a small `TubingCDC` API, optional **binlog position** persistence (Badger + Redis), and pluggable row handlers and sinks. Watermarked chunk dumps, unified log/snapshot event envelopes, and leader-based HA from the paper are **not implemented yet** (see [coverage-vs-dblog.md](coverage-vs-dblog.md) and [roadmap.md](roadmap.md)).
+The code today provides a MySQL binlog pipeline on [go-mysql canal](https://github.com/go-mysql-org/go-mysql), optional Badger/Redis position persistence, pluggable handlers and sinks, unified log/snapshot envelopes, watermarked PK-chunk snapshots, Redis leader leases, and multi-MySQL composition. PostgreSQL/generic log sources and full ZooKeeper-style cluster metadata remain roadmap work; see [coverage-vs-dblog.md](coverage-vs-dblog.md) and [roadmap.md](roadmap.md).
 
 It wraps go-mysql canal for MySQL binlog consumption and exposes a small `TubingCDC` API plus pluggable event handlers.
 

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-mysql-org/go-mysql/canal"
 )
 
 func TestAlgorithm1ChunkDriverConfig_validate(t *testing.T) {
@@ -47,6 +49,14 @@ func TestAlgorithm1ChunkDriverConfig_validate(t *testing.T) {
 			cfg:     Algorithm1ChunkDriverConfig{Watermark: wm, Tracker: NewAlgorithm1Tracker(), TargetTableKey: "a.b", RowSink: LoggerRowSink{}},
 			wantErr: true,
 			errSub:  "JobQueue",
+		},
+		{
+			name: "invalid error policy",
+			cfg: Algorithm1ChunkDriverConfig{
+				Watermark: wm, Tracker: NewAlgorithm1Tracker(), TargetTableKey: "a.b", RowSink: LoggerRowSink{}, JobQueue: NewFullStateJobQueue(), ErrorPolicy: 99,
+			},
+			wantErr: true,
+			errSub:  "ErrorPolicy",
 		},
 	}
 	for _, tt := range tests {
@@ -290,6 +300,15 @@ func TestTubingCDC_StartAlgorithm1ChunkDriver_nilCanal(t *testing.T) {
 	cdc := &TubingCDC{}
 	err := cdc.StartAlgorithm1ChunkDriver(context.Background(), cfg)
 	if err == nil || !strings.Contains(err.Error(), "nil") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestTubingCDC_StartAlgorithm1ChunkDriver_nilContext(t *testing.T) {
+	cdc := &TubingCDC{river: &canal.Canal{}}
+	//nolint:staticcheck // The nil context is the behavior under test.
+	err := cdc.StartAlgorithm1ChunkDriver(nil, Algorithm1ChunkDriverConfig{})
+	if err == nil || !strings.Contains(err.Error(), "context is nil") {
 		t.Fatalf("got %v", err)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dgraph-io/badger/v4"
 )
 
 func skipWithoutMySQL(t *testing.T) {
@@ -86,6 +88,17 @@ func TestValidateMySQLSourceSpecs(t *testing.T) {
 				t.Fatalf("err %q should contain %q", err.Error(), tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateMySQLSourceSpecs_rejectsSharedDynamicHandler(t *testing.T) {
+	handler := NewDynamicTableEventHandler(nil)
+	err := ValidateMySQLSourceSpecs([]MySQLSourceSpec{
+		{ID: "one", Config: &Configs{EventHandler: handler}},
+		{ID: "two", Config: &Configs{EventHandler: handler}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "share one DynamicTableEventHandler") {
+		t.Fatalf("got %v", err)
 	}
 }
 
@@ -180,6 +193,59 @@ func TestApplyMySQLSourcePersistenceScope(t *testing.T) {
 	}
 }
 
+func TestApplyMySQLSourcePersistenceDefaultsAndValidate(t *testing.T) {
+	dir := t.TempDir()
+	cfgs := []*Configs{
+		{PositionPersistence: &PositionPersistence{BadgerDir: dir}, ChunkProgressPersistence: &ChunkProgressPersistence{BadgerDir: dir}},
+		{PositionPersistence: &PositionPersistence{BadgerDir: dir}, ChunkProgressPersistence: &ChunkProgressPersistence{BadgerDir: dir}},
+	}
+	ids := []string{"one", "two"}
+	for i := range cfgs {
+		applyMySQLSourcePersistenceDefaults(cfgs[i], ids[i])
+	}
+	if cfgs[0].SourceID != "one" || cfgs[0].PositionPersistence.BadgerKey == cfgs[1].PositionPersistence.BadgerKey || cfgs[0].ChunkProgressPersistence.BadgerKeyPrefix == cfgs[1].ChunkProgressPersistence.BadgerKeyPrefix {
+		t.Fatalf("defaults are not source scoped: %#v %#v", cfgs[0], cfgs[1])
+	}
+	if err := validateMySQLSourcePersistenceScopes(ids, cfgs); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateMySQLSourcePersistenceScopesRejectsCustomCollision(t *testing.T) {
+	dir := t.TempDir()
+	cfgs := []*Configs{
+		{PositionPersistence: &PositionPersistence{BadgerDir: dir, BadgerKey: "same"}},
+		{PositionPersistence: &PositionPersistence{BadgerDir: dir, BadgerKey: "same"}},
+	}
+	if err := validateMySQLSourcePersistenceScopes([]string{"one", "two"}, cfgs); err == nil || !strings.Contains(err.Error(), "same Badger position key") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestValidateMySQLSourcePersistenceScopesRejectsSourceIDCollision(t *testing.T) {
+	cfgs := []*Configs{{SourceID: "shared"}, {SourceID: "shared"}}
+	if err := validateMySQLSourcePersistenceScopes([]string{"one", "two"}, cfgs); err == nil || !strings.Contains(err.Error(), "share SourceID") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestSharedBadgerForDirReusesHandle(t *testing.T) {
+	dbs := make(map[string]*badger.DB)
+	dir := t.TempDir()
+	first, err := sharedBadgerForDir(dbs, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = closeBadgerMap(dbs) })
+	second, err := sharedBadgerForDir(dbs, dir+"/.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatal("expected one Badger handle per directory")
+	}
+}
+
 func cloneConfigsForScopeTest(c *Configs) *Configs {
 	out := *c
 	if c.PositionPersistence != nil {
@@ -247,6 +313,7 @@ func TestMultiMySQLCDC_Run_nilContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
+	//nolint:staticcheck // The nil context is the behavior under test.
 	err = m.Run(nil)
 	if err == nil || !strings.Contains(err.Error(), "context is nil") {
 		t.Fatalf("got %v", err)

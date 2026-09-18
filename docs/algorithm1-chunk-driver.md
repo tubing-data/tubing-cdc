@@ -6,9 +6,10 @@ Set `Configs.FullSync` to run a complete snapshot automatically from `Run` or `R
 
 `Watermark`, `ChunkProgressPersistence`, a `RowSink`, and at least one valid `FullStateTableSpec` are required. Do not also set the lower-level `Algorithm1` or `FullStateJobQueue` fields. By default old cursors are cleared so each application start performs a fresh full sync; `FullSync.Resume` retains cursors for restart recovery.
 
-Chunk progress records persist `running`, `completed`, or `failed` status, the last error, and an
-update timestamp. With `Resume` enabled, completed table/run pairs are skipped rather than being
-mistaken for snapshots that never started.
+Chunk progress records persist `running`, `completed`, or `failed` status, the chunk size, ordered
+primary-key columns, last cursor, last error, and an update timestamp. Resume rejects records whose
+chunk size or primary-key ordering differs from the current job. With `Resume` enabled, completed
+table/run pairs are skipped rather than being mistaken for snapshots that never started.
 
 `TubingCDC.StartAlgorithm1ChunkDriver` runs a background loop that:
 
@@ -44,6 +45,7 @@ mistaken for snapshots that never started.
 ### Timeouts
 
 - `PhaseWaitTimeout` (default 60s) bounds polling for `Algorithm1PhaseWindowOpen` and `Algorithm1PhaseReady` after each watermark `Execute`. Tighten or loosen for your replication lag and load.
+- `Canal.Execute` itself has no context-aware API in the pinned go-mysql version. Configure MySQL-side statement and lock timeouts so a blocked watermark write or chunk query cannot delay shutdown indefinitely.
 
 ### Chunk cursor
 
@@ -52,5 +54,5 @@ mistaken for snapshots that never started.
 ## Lifecycle
 
 - Call `StartAlgorithm1ChunkDriver` **after** `TubingCDC` is constructed and **while** `Run` / `RunFrom` is processing events (otherwise watermark phases never advance).
-- `TubingCDC.Close` calls `StopAlgorithm1ChunkDriver` first.
+- `TubingCDC.Shutdown` calls `StopAlgorithm1ChunkDriver` first and returns persistence close errors; `Close` is the compatibility wrapper.
 - Starting a driver when one is already running returns an error.

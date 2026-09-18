@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-mysql-org/go-mysql/canal"
+	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/go-mysql-org/go-mysql/schema"
 	"github.com/siddontang/go-log/log"
@@ -27,14 +28,17 @@ type DynamicTableEventHandler struct {
 
 	// useEnvelope wraps each row JSON in CDCEventEnvelope (P0 DBLog-aligned shape).
 	useEnvelope bool
+	sourceID    string
 
 	fieldRules      []RowFieldTransformRule
 	pipeline        Processor
 	onPipelineError PipelineErrorHandler
+	pipelineCtx     context.Context
 
 	mu            sync.Mutex
 	rowLayout     map[string]rowColumnLayout
 	printedSource map[string]bool
+	binlogFile    string
 }
 
 // rowColumnLayout holds per-table JSON field names in column order (aligned with canal row slices).
@@ -71,6 +75,15 @@ func WithDBLogEnvelope(enable bool) DynamicHandlerOption {
 	}
 }
 
+// WithEventSourceID sets the stable replication-source identifier included in
+// envelopes and event-id generation. NewTubingCDC supplies Configs.SourceID (or
+// Address) when this option is not set.
+func WithEventSourceID(sourceID string) DynamicHandlerOption {
+	return func(h *DynamicTableEventHandler) {
+		h.sourceID = strings.TrimSpace(sourceID)
+	}
+}
+
 // WithRowFieldTransformRules registers destination-side field transforms. TableKey empty means
 // the rule applies to every table. SourceColumn is the JSON field name (same as the column name
 // in the default mapping). Transform receives the current cell value; returned entries are merged
@@ -94,6 +107,15 @@ func WithPipeline(processor Processor) DynamicHandlerOption {
 func WithPipelineErrorHandler(handler PipelineErrorHandler) DynamicHandlerOption {
 	return func(h *DynamicTableEventHandler) {
 		h.onPipelineError = handler
+	}
+}
+
+// WithPipelineContext supplies the context passed to processors and pipeline
+// error handlers. When the handler is owned by TubingCDC, the default context is
+// cancelled during Shutdown.
+func WithPipelineContext(ctx context.Context) DynamicHandlerOption {
+	return func(h *DynamicTableEventHandler) {
+		h.pipelineCtx = ctx
 	}
 }
 
@@ -130,6 +152,44 @@ func (h *DynamicTableEventHandler) String() string {
 	return "DynamicTableEventHandler"
 }
 
+func (h *DynamicTableEventHandler) setSourceIDIfEmpty(sourceID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.sourceID == "" {
+		h.sourceID = strings.TrimSpace(sourceID)
+	}
+}
+
+func (h *DynamicTableEventHandler) bindPipelineContextIfEmpty(ctx context.Context) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.pipelineCtx != nil {
+		return false
+	}
+	h.pipelineCtx = ctx
+	return true
+}
+
+func (h *DynamicTableEventHandler) OnRotate(_ *replication.EventHeader, rotateEvent *replication.RotateEvent) error {
+	if rotateEvent == nil {
+		return nil
+	}
+	h.mu.Lock()
+	h.binlogFile = string(rotateEvent.NextLogName)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *DynamicTableEventHandler) OnPosSynced(_ *replication.EventHeader, pos mysql.Position, _ mysql.GTIDSet, _ bool) error {
+	if pos.Name == "" {
+		return nil
+	}
+	h.mu.Lock()
+	h.binlogFile = pos.Name
+	h.mu.Unlock()
+	return nil
+}
+
 func (h *DynamicTableEventHandler) OnTableChanged(_ *replication.EventHeader, schema, table string) error {
 	key := tableFQN(schema, table)
 	h.mu.Lock()
@@ -164,7 +224,7 @@ func (h *DynamicTableEventHandler) OnRow(e *canal.RowsEvent) error {
 	switch e.Action {
 	case canal.UpdateAction:
 		for i := 0; i+1 < len(e.Rows); i += 2 {
-			if err := h.emitRow(key, e.Action, e.Table, e, map[string]any{
+			if err := h.emitRow(key, e.Action, e.Table, e, i/2, map[string]any{
 				"before": rowValuesToMap(layout, e.Rows[i]),
 				"after":  rowValuesToMap(layout, e.Rows[i+1]),
 			}); err != nil {
@@ -172,8 +232,8 @@ func (h *DynamicTableEventHandler) OnRow(e *canal.RowsEvent) error {
 			}
 		}
 	default:
-		for _, row := range e.Rows {
-			if err := h.emitRow(key, e.Action, e.Table, e, rowValuesToMap(layout, row)); err != nil {
+		for i, row := range e.Rows {
+			if err := h.emitRow(key, e.Action, e.Table, e, i, rowValuesToMap(layout, row)); err != nil {
 				return err
 			}
 		}
@@ -189,7 +249,7 @@ func (h *DynamicTableEventHandler) allows(key string) bool {
 	return ok
 }
 
-func (h *DynamicTableEventHandler) emitRow(tableKey, action string, tbl *schema.Table, ev *canal.RowsEvent, payload any) error {
+func (h *DynamicTableEventHandler) emitRow(tableKey, action string, tbl *schema.Table, ev *canal.RowsEvent, rowOrdinal int, payload any) error {
 	resolved := payload
 	if len(h.fieldRules) != 0 {
 		out, prepErr := h.applyFieldRulesToPayload(tableKey, action, payload)
@@ -199,15 +259,25 @@ func (h *DynamicTableEventHandler) emitRow(tableKey, action string, tbl *schema.
 		resolved = out
 	}
 
-	event, err := eventFromResolvedPayload(tableKey, action, tbl, ev, resolved)
+	h.mu.Lock()
+	sourceID := h.sourceID
+	binlogFile := h.binlogFile
+	h.mu.Unlock()
+	event, err := eventFromResolvedPayload(tableKey, action, tbl, ev, sourceID, binlogFile, rowOrdinal, resolved)
 	if err != nil {
 		return err
 	}
 	events := []Event{event}
 	if h.pipeline != nil {
-		events, err = h.pipeline(context.Background(), event)
+		h.mu.Lock()
+		pipelineCtx := h.pipelineCtx
+		h.mu.Unlock()
+		if pipelineCtx == nil {
+			pipelineCtx = context.Background()
+		}
+		events, err = h.pipeline(pipelineCtx, event)
 		if err != nil {
-			if handledErr := h.onPipelineError(context.Background(), event, err); handledErr != nil {
+			if handledErr := h.onPipelineError(pipelineCtx, event, err); handledErr != nil {
 				return fmt.Errorf("CDC %s %s pipeline: %w", action, tableKey, handledErr)
 			}
 			return nil
@@ -221,14 +291,21 @@ func (h *DynamicTableEventHandler) emitRow(tableKey, action string, tbl *schema.
 	return nil
 }
 
-func eventFromResolvedPayload(tableKey, action string, tbl *schema.Table, ev *canal.RowsEvent, payload any) (Event, error) {
+func eventFromResolvedPayload(tableKey, action string, tbl *schema.Table, ev *canal.RowsEvent, sourceID, binlogFile string, rowOrdinal int, payload any) (Event, error) {
 	id, err := ParseTableIdentity(tableKey)
 	if err != nil {
 		return Event{}, err
 	}
-	event := Event{SchemaVersion: DefaultEnvelopeSchemaVersion, Origin: OriginLog, Action: action, Table: id}
+	event := Event{SchemaVersion: DefaultEnvelopeSchemaVersion, SourceID: sourceID, Origin: OriginLog, Action: action, Table: id, RowOrdinal: rowOrdinal}
 	if ev != nil {
-		event.Position = BinlogPositionFromSources(nil, ev.Header)
+		var position *mysql.Position
+		if binlogFile != "" {
+			position = &mysql.Position{Name: binlogFile}
+			if ev.Header != nil {
+				position.Pos = ev.Header.LogPos
+			}
+		}
+		event.Position = BinlogPositionFromSources(position, ev.Header)
 	}
 	if action == canal.UpdateAction {
 		if pair, ok := payload.(map[string]any); ok {
@@ -258,7 +335,7 @@ func (h *DynamicTableEventHandler) emitEvent(event Event) error {
 	}
 	if h.useEnvelope {
 		if event.EventID == "" {
-			event.EventID = StableEventID(event.Origin, event.Action, event.TableKey(), event.PrimaryKey, event.Position, b)
+			event.EventID = StableEventIDWithCoordinates(event.SourceID, event.Origin, event.Action, event.TableKey(), event.PrimaryKey, event.Position, event.RowOrdinal, b)
 		}
 		schemaVersion := event.SchemaVersion
 		if schemaVersion == "" {
@@ -267,11 +344,13 @@ func (h *DynamicTableEventHandler) emitEvent(event Event) error {
 		b, err = json.Marshal(CDCEventEnvelope{
 			EventID:       event.EventID,
 			SchemaVersion: schemaVersion,
+			SourceID:      event.SourceID,
 			Origin:        event.Origin,
 			Action:        event.Action,
 			Table:         event.Table,
 			PrimaryKey:    event.PrimaryKey,
 			Position:      event.Position,
+			RowOrdinal:    event.RowOrdinal,
 			Payload:       json.RawMessage(b),
 		})
 		if err != nil {

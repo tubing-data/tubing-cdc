@@ -2,9 +2,12 @@ package tubing_cdc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/dgraph-io/badger/v4"
 )
 
 // MySQLSourceSpec identifies one MySQL replication source for P6 multi-instance composition.
@@ -24,6 +27,7 @@ func ValidateMySQLSourceSpecs(specs []MySQLSourceSpec) error {
 		return fmt.Errorf("tubingcdc: no MySQL sources")
 	}
 	seen := make(map[string]struct{}, len(specs))
+	seenDynamicHandlers := make(map[*DynamicTableEventHandler]string)
 	for i, s := range specs {
 		id, err := sanitizeMySQLSourceID(s.ID)
 		if err != nil {
@@ -35,6 +39,12 @@ func ValidateMySQLSourceSpecs(specs []MySQLSourceSpec) error {
 		seen[id] = struct{}{}
 		if s.Config == nil {
 			return fmt.Errorf("tubingcdc: source %q: Config is nil", id)
+		}
+		if handler, ok := s.Config.EventHandler.(*DynamicTableEventHandler); ok && handler != nil {
+			if previous, exists := seenDynamicHandlers[handler]; exists {
+				return fmt.Errorf("tubingcdc: sources %q and %q share one DynamicTableEventHandler; use one handler per source", previous, id)
+			}
+			seenDynamicHandlers[handler] = id
 		}
 	}
 	return nil
@@ -98,9 +108,11 @@ func sanitizeMySQLSourceID(id string) (string, error) {
 // MultiMySQLCDC runs several independent TubingCDC instances (one MySQL server each).
 // PostgreSQL or other log protocols are not implemented here; see roadmap P6 TODO.
 type MultiMySQLCDC struct {
-	ids       []string
-	cdc       []*TubingCDC
-	closeOnce sync.Once
+	ids          []string
+	cdc          []*TubingCDC
+	sharedBadger map[string]*badger.DB
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 // NewMultiMySQLCDC builds one TubingCDC per spec. On partial failure it closes instances
@@ -111,19 +123,125 @@ func NewMultiMySQLCDC(specs []MySQLSourceSpec) (*MultiMySQLCDC, error) {
 	}
 	ids := make([]string, len(specs))
 	cdc := make([]*TubingCDC, len(specs))
+	sharedBadger := make(map[string]*badger.DB)
+	prepared := make([]*Configs, len(specs))
 	for i, s := range specs {
 		id, _ := sanitizeMySQLSourceID(s.ID)
 		ids[i] = id
-		c, err := NewTubingCDC(s.Config)
+		prepared[i] = cloneConfigsForSource(s.Config)
+		applyMySQLSourcePersistenceDefaults(prepared[i], id)
+	}
+	if err := validateMySQLSourcePersistenceScopes(ids, prepared); err != nil {
+		return nil, err
+	}
+	for i, cfg := range prepared {
+		id := ids[i]
+		c, err := newTubingCDC(cfg, sharedBadger)
 		if err != nil {
+			var rollbackErrs []error
 			for j := 0; j < i; j++ {
-				cdc[j].Close()
+				if closeErr := cdc[j].Shutdown(); closeErr != nil {
+					rollbackErrs = append(rollbackErrs, closeErr)
+				}
 			}
-			return nil, fmt.Errorf("tubingcdc: source %q: %w", id, err)
+			if closeErr := closeBadgerMap(sharedBadger); closeErr != nil {
+				rollbackErrs = append(rollbackErrs, closeErr)
+			}
+			return nil, errors.Join(fmt.Errorf("tubingcdc: source %q: %w", id, err), errors.Join(rollbackErrs...))
 		}
 		cdc[i] = c
 	}
-	return &MultiMySQLCDC{ids: ids, cdc: cdc}, nil
+	return &MultiMySQLCDC{ids: ids, cdc: cdc, sharedBadger: sharedBadger}, nil
+}
+
+func cloneConfigsForSource(cfg *Configs) *Configs {
+	out := *cfg
+	out.Tables = append([]string(nil), cfg.Tables...)
+	if cfg.PositionPersistence != nil {
+		pp := *cfg.PositionPersistence
+		out.PositionPersistence = &pp
+	}
+	if cfg.ChunkProgressPersistence != nil {
+		cp := *cfg.ChunkProgressPersistence
+		out.ChunkProgressPersistence = &cp
+	}
+	return &out
+}
+
+func applyMySQLSourcePersistenceDefaults(cfg *Configs, sourceID string) {
+	if strings.TrimSpace(cfg.SourceID) == "" {
+		cfg.SourceID = sourceID
+	}
+	if cfg.PositionPersistence != nil {
+		if strings.TrimSpace(cfg.PositionPersistence.BadgerKey) == "" {
+			cfg.PositionPersistence.BadgerKey = defaultBadgerStateKey + "/" + sourceID
+		}
+		if strings.TrimSpace(cfg.PositionPersistence.RedisKey) == "" {
+			cfg.PositionPersistence.RedisKey = defaultRedisPositionKey + ":" + sourceID
+		}
+	}
+	if cfg.ChunkProgressPersistence != nil && strings.TrimSpace(cfg.ChunkProgressPersistence.BadgerKeyPrefix) == "" {
+		cfg.ChunkProgressPersistence.BadgerKeyPrefix = strings.TrimSuffix(DefaultChunkProgressKeyPrefix, "/") + "/" + sourceID + "/"
+	}
+}
+
+func validateMySQLSourcePersistenceScopes(ids []string, cfgs []*Configs) error {
+	sourceIDs := make(map[string]string)
+	badgerKeys := make(map[string]string)
+	chunkPrefixes := make(map[string]string)
+	redisKeys := make(map[string]string)
+	for i, cfg := range cfgs {
+		id := ids[i]
+		sourceID := strings.TrimSpace(cfg.SourceID)
+		if sourceID != "" {
+			if previous, exists := sourceIDs[sourceID]; exists {
+				return fmt.Errorf("tubingcdc: sources %q and %q share SourceID %q", previous, id, sourceID)
+			}
+			sourceIDs[sourceID] = id
+		}
+		if pp := cfg.PositionPersistence; pp != nil {
+			dir, err := canonicalBadgerDir(pp.BadgerDir)
+			if err != nil {
+				return fmt.Errorf("tubingcdc: source %q: %w", id, err)
+			}
+			badgerKey := dir + "\x00" + strings.TrimSpace(pp.BadgerKey)
+			if previous, exists := badgerKeys[badgerKey]; exists {
+				return fmt.Errorf("tubingcdc: sources %q and %q share the same Badger position key", previous, id)
+			}
+			badgerKeys[badgerKey] = id
+			if strings.TrimSpace(pp.RedisAddr) != "" {
+				redisKey := fmt.Sprintf("%s\x00%d\x00%s", strings.TrimSpace(pp.RedisAddr), pp.RedisDB, strings.TrimSpace(pp.RedisKey))
+				if previous, exists := redisKeys[redisKey]; exists {
+					return fmt.Errorf("tubingcdc: sources %q and %q share the same Redis position key", previous, id)
+				}
+				redisKeys[redisKey] = id
+			}
+		}
+		if cp := cfg.ChunkProgressPersistence; cp != nil {
+			dir, err := canonicalBadgerDir(cp.BadgerDir)
+			if err != nil {
+				return fmt.Errorf("tubingcdc: source %q: %w", id, err)
+			}
+			chunkKey := dir + "\x00" + normalizeChunkKeyPrefix(cp.BadgerKeyPrefix)
+			if previous, exists := chunkPrefixes[chunkKey]; exists {
+				return fmt.Errorf("tubingcdc: sources %q and %q share the same Badger chunk prefix", previous, id)
+			}
+			chunkPrefixes[chunkKey] = id
+		}
+	}
+	return nil
+}
+
+func closeBadgerMap(dbs map[string]*badger.DB) error {
+	var errs []error
+	for _, db := range dbs {
+		if db != nil {
+			if err := db.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // SourceIDs returns the ordered spec IDs (same order as Instances).
@@ -148,17 +266,32 @@ func (m *MultiMySQLCDC) Instances() []*TubingCDC {
 
 // Close stops drivers and closes every instance. Safe to call more than once (e.g. after Run returns).
 func (m *MultiMySQLCDC) Close() {
+	_ = m.Shutdown()
+}
+
+// Shutdown idempotently closes every source and shared Badger handle, returning
+// any persistence shutdown errors. Close is the compatibility wrapper.
+func (m *MultiMySQLCDC) Shutdown() error {
 	if m == nil {
-		return
+		return nil
 	}
 	m.closeOnce.Do(func() {
+		var errs []error
 		for _, c := range m.cdc {
 			if c != nil {
-				c.Close()
+				if err := c.Shutdown(); err != nil {
+					errs = append(errs, err)
+				}
 			}
 		}
+		if err := closeBadgerMap(m.sharedBadger); err != nil {
+			errs = append(errs, err)
+		}
+		m.closeErr = errors.Join(errs...)
+		m.sharedBadger = nil
 		m.cdc = nil
 	})
+	return m.closeErr
 }
 
 // Run starts each instance's canal Run in its own goroutine. It returns when ctx is cancelled
@@ -207,12 +340,9 @@ func (m *MultiMySQLCDC) Run(ctx context.Context) error {
 		reason = err
 	}
 
-	m.Close()
+	shutdownErr := m.Shutdown()
 	cancel()
 	<-waitDone
 
-	if reason != nil {
-		return reason
-	}
-	return nil
+	return errors.Join(reason, shutdownErr)
 }

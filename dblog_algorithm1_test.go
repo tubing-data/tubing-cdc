@@ -101,7 +101,9 @@ func TestAlgorithm1Tracker_cycle_reconcile(t *testing.T) {
 				t.Fatalf("phase=%v", tr.Phase())
 			}
 			for _, r := range tt.recordRows {
-				tr.RecordTargetRowChange("db.t", r)
+				if err := tr.RecordTargetRowChange("db.t", r); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := tr.OnWatermark(WatermarkBinlogEvent{NewValue: "high-u"}); err != nil {
 				t.Fatal(err)

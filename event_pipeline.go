@@ -14,11 +14,13 @@ type Row map[string]any
 type Event struct {
 	EventID       string
 	SchemaVersion string
+	SourceID      string
 	Origin        EventOrigin
 	Action        string
 	Table         TableIdentity
 	PrimaryKey    Row
 	Position      *BinlogPosition
+	RowOrdinal    int
 	Before        Row
 	After         Row
 	Metadata      map[string]any

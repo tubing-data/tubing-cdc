@@ -28,6 +28,7 @@ type ChunkProgressRecord struct {
 	TableKey  string              `json:"table_key"`
 	RunID     string              `json:"run_id,omitempty"`
 	ChunkSize int                 `json:"chunk_size"`
+	PKColumns []string            `json:"pk_columns,omitempty"`
 	AfterPK   []any               `json:"after_pk,omitempty"`
 	Status    ChunkProgressStatus `json:"status,omitempty"`
 	LastError string              `json:"last_error,omitempty"`
@@ -52,6 +53,20 @@ func (r ChunkProgressRecord) Validate() error {
 	}
 	if r.ChunkSize <= 0 {
 		return fmt.Errorf("chunk progress: chunk_size must be positive")
+	}
+	seenPK := make(map[string]struct{}, len(r.PKColumns))
+	for _, column := range r.PKColumns {
+		column = strings.TrimSpace(column)
+		if column == "" {
+			return fmt.Errorf("chunk progress: empty pk column")
+		}
+		if _, exists := seenPK[column]; exists {
+			return fmt.Errorf("chunk progress: duplicate pk column %q", column)
+		}
+		seenPK[column] = struct{}{}
+	}
+	if len(r.PKColumns) != 0 && len(r.AfterPK) != 0 && len(r.AfterPK) != len(r.PKColumns) {
+		return fmt.Errorf("chunk progress: after_pk length %d must equal pk_columns length %d", len(r.AfterPK), len(r.PKColumns))
 	}
 	switch r.Status {
 	case "", ChunkProgressRunning, ChunkProgressCompleted, ChunkProgressFailed:

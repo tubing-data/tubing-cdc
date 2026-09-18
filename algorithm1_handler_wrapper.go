@@ -43,7 +43,9 @@ func (w *algorithm1HandlerWrapper) OnRow(e *canal.RowsEvent) error {
 	if e != nil && e.Table != nil {
 		tk := tableFQN(e.Table.Schema, e.Table.Name)
 		if w.targetTableKey == "" || tk == w.targetTableKey {
-			w.recordRowEvent(e)
+			if err := w.recordRowEvent(e); err != nil {
+				return err
+			}
 		}
 	}
 	return w.inner.OnRow(e)
@@ -65,30 +67,39 @@ func (w *algorithm1HandlerWrapper) String() string {
 	return w.inner.String() + "+Algorithm1"
 }
 
-func (w *algorithm1HandlerWrapper) recordRowEvent(e *canal.RowsEvent) {
+func (w *algorithm1HandlerWrapper) recordRowEvent(e *canal.RowsEvent) error {
 	tbl := e.Table
 	switch e.Action {
 	case canal.InsertAction:
 		for _, row := range e.Rows {
 			m := rowMapFromCanalRow(tbl, row)
-			w.tracker.RecordTargetRowChange(tableFQN(tbl.Schema, tbl.Name), m)
+			if err := w.tracker.RecordTargetRowChange(tableFQN(tbl.Schema, tbl.Name), m); err != nil {
+				return err
+			}
 		}
 	case canal.DeleteAction:
 		for _, row := range e.Rows {
 			m := rowMapFromCanalRow(tbl, row)
-			w.tracker.RecordTargetRowChange(tableFQN(tbl.Schema, tbl.Name), m)
+			if err := w.tracker.RecordTargetRowChange(tableFQN(tbl.Schema, tbl.Name), m); err != nil {
+				return err
+			}
 		}
 	case canal.UpdateAction:
 		tk := tableFQN(tbl.Schema, tbl.Name)
 		for i := 0; i+1 < len(e.Rows); i += 2 {
 			before := rowMapFromCanalRow(tbl, e.Rows[i])
 			after := rowMapFromCanalRow(tbl, e.Rows[i+1])
-			w.tracker.RecordTargetRowChange(tk, before)
-			w.tracker.RecordTargetRowChange(tk, after)
+			if err := w.tracker.RecordTargetRowChange(tk, before); err != nil {
+				return err
+			}
+			if err := w.tracker.RecordTargetRowChange(tk, after); err != nil {
+				return err
+			}
 		}
 	default:
-		return
+		return nil
 	}
+	return nil
 }
 
 func rowMapFromCanalRow(tbl *schema.Table, row []interface{}) map[string]any {

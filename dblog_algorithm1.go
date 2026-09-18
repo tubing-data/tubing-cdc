@@ -127,26 +127,27 @@ func (t *Algorithm1Tracker) OnWatermark(ev WatermarkBinlogEvent) error {
 // RecordTargetRowChange records one primary key tuple if the window is open and tableKey matches
 // the capture target. row must contain JSON keys produced from column names via JSONFieldNameForColumn
 // (same shape as rowMapFromCanalRow + DynamicTableEventHandler).
-func (t *Algorithm1Tracker) RecordTargetRowChange(tableKey string, row map[string]any) {
+func (t *Algorithm1Tracker) RecordTargetRowChange(tableKey string, row map[string]any) error {
 	if t == nil || len(row) == 0 {
-		return
+		return nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.phase != algorithm1WindowOpen {
-		return
+		return nil
 	}
 	if strings.TrimSpace(tableKey) != t.targetTable {
-		return
+		return nil
 	}
 	if len(t.pkColumns) == 0 {
-		return
+		return fmt.Errorf("algorithm1: pk columns not set while capture window is open")
 	}
 	key, err := pkTupleKey(t.pkColumns, row)
 	if err != nil {
-		return
+		return err
 	}
 	t.pkSeen[key] = struct{}{}
+	return nil
 }
 
 // Phase returns the current lifecycle phase (for tests and operators).

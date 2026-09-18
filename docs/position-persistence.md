@@ -3,7 +3,7 @@
 To avoid reprocessing events after restarts and to support recovery, you can persist the sync position in two tiers:
 
 1. **Badger (local)** — After each successful canal **`OnPosSynced`** callback (for example when a transaction commits via `XIDEvent`, and likewise for rotate/DDL when canal chooses to save), the latest **`mysql.Position`** plus an optional **GTID** string are written to a local Badger database.
-2. **Redis (periodic)** — If `RedisAddr` is set, a background goroutine **SET**s the same JSON snapshot on a configurable interval (**default 5 minutes** when `FlushToRedisInterval` is zero). **`TubingCDC.Close()`** stops that loop, performs a **final Redis write**, then closes Badger and the Redis client—so always call **`Close()`** on shutdown.
+2. **Redis (periodic)** — If `RedisAddr` is set, a background goroutine **SET**s the same JSON snapshot on a configurable interval (**default 5 minutes** when `FlushToRedisInterval` is zero). **`TubingCDC.Shutdown()`** stops that loop, performs a **final Redis write**, then closes Badger and the Redis client. It returns final-flush/close errors; `Close()` is the compatibility wrapper that discards them.
 
 Enable this by setting **`Configs.PositionPersistence`** with a non-empty **`BadgerDir`**. The user `EventHandler` is wrapped automatically; your `OnPosSynced` (if overridden) still runs first, and persistence runs only when it returns no error.
 
@@ -45,8 +45,8 @@ The stored JSON shape is **`tubingcdc.BinlogStateRecord`** (`file`, `pos`, optio
 
 Implementation: `position_store.go`, `position_handler_wrapper.go`.
 
-For the common restart path, use `RunTubingCDCWithRecovery(ctx, cfg)`. It reads a checkpoint
-from Redis first (when configured), falls back to Badger, and calls `RunFrom`; when no checkpoint
+For the common restart path, use `RunTubingCDCWithRecovery(ctx, cfg)`. It reads both configured
+checkpoints, chooses the newer comparable binlog file/offset (preferring Redis when filenames cannot be safely ordered), and calls `RunFrom`; when no checkpoint
 exists it starts from the current MySQL master position. Redis-backed leader election requires
 `PositionPersistence` with Redis enabled and repeats this lookup for every leader term so a takeover never starts
 silently at the current master position.

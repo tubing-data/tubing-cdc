@@ -241,6 +241,21 @@ func TestStableEventID_deterministicAndPayloadSensitive(t *testing.T) {
 	}
 }
 
+func TestStableEventIDWithCoordinates_separatesSourcesFilesAndRows(t *testing.T) {
+	payload := []byte(`{"value":"same"}`)
+	base := StableEventIDWithCoordinates("source-a", OriginLog, canal.InsertAction, "a.b", nil, &BinlogPosition{File: "bin.1", Pos: 42}, 0, payload)
+	cases := []string{
+		StableEventIDWithCoordinates("source-b", OriginLog, canal.InsertAction, "a.b", nil, &BinlogPosition{File: "bin.1", Pos: 42}, 0, payload),
+		StableEventIDWithCoordinates("source-a", OriginLog, canal.InsertAction, "a.b", nil, &BinlogPosition{File: "bin.2", Pos: 42}, 0, payload),
+		StableEventIDWithCoordinates("source-a", OriginLog, canal.InsertAction, "a.b", nil, &BinlogPosition{File: "bin.1", Pos: 42}, 1, payload),
+	}
+	for _, got := range cases {
+		if got == base {
+			t.Fatalf("coordinate change must alter event id: %q", got)
+		}
+	}
+}
+
 func TestMarshalCDCEventEnvelope_defaultSchemaVersion(t *testing.T) {
 	b, err := MarshalCDCEventEnvelope("", OriginLog, canal.InsertAction, "a.b", &schema.Table{}, map[string]any{}, []byte(`{}`), nil, nil)
 	if err != nil {

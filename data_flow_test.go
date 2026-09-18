@@ -1,6 +1,7 @@
 package tubing_cdc
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -13,9 +14,9 @@ func TestTableIncludeRegex(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{name: "dem_test", input: "cdc_test.dem_test", want: `cdc_test\.dem_test`},
-		{name: "simple names", input: "db.t", want: `db\.t`},
-		{name: "table name contains dot", input: "a.b.c", want: `a\.b\.c`},
+		{name: "dem_test", input: "cdc_test.dem_test", want: `^cdc_test\.dem_test$`},
+		{name: "simple names", input: "db.t", want: `^db\.t$`},
+		{name: "table name contains dot", input: "a.b.c", want: `^a\.b\.c$`},
 		{name: "no dot", input: "invalid", wantErr: true},
 		{name: "empty db", input: ".t", wantErr: true},
 		{name: "empty table", input: "db.", wantErr: true},
@@ -36,6 +37,13 @@ func TestTableIncludeRegex(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+	re, err := regexp.Compile(`^db\.users$`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !re.MatchString("db.users") || re.MatchString("db.users_archive") {
+		t.Fatal("table include regex must match exactly one fully-qualified table")
 	}
 }
 
@@ -63,6 +71,7 @@ func TestFullSyncConfigValidate(t *testing.T) {
 		{name: "progress required", cfg: Configs{Watermark: base.Watermark}, fs: *valid, want: "ChunkProgressPersistence"},
 		{name: "sink required", cfg: *base, fs: FullSyncConfig{Tables: valid.Tables}, want: "RowSink"},
 		{name: "tables required", cfg: *base, fs: FullSyncConfig{RowSink: LoggerRowSink{}}, want: "no tables"},
+		{name: "invalid error policy", cfg: *base, fs: FullSyncConfig{RowSink: LoggerRowSink{}, Tables: valid.Tables, ErrorPolicy: Algorithm1DriverErrorPolicy(99)}, want: "ErrorPolicy"},
 		{name: "duplicate", cfg: *base, fs: FullSyncConfig{RowSink: LoggerRowSink{}, Tables: append(valid.Tables, valid.Tables[0])}, want: "duplicate"},
 		{name: "table not replicated", cfg: *base, fs: FullSyncConfig{RowSink: LoggerRowSink{}, Tables: []FullStateTableSpec{{TableKey: "db.two", PKColumns: []string{"id"}, ChunkSize: 1}}}, want: "Configs.Tables"},
 		{name: "low level conflict", cfg: Configs{Watermark: base.Watermark, ChunkProgressPersistence: base.ChunkProgressPersistence, Algorithm1: &Algorithm1Config{}}, fs: *valid, want: "cannot be combined"},
@@ -165,5 +174,24 @@ func TestTubingCDC_EnqueueFullStateJobs_nilReceiver(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "nil") {
 		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func TestTubingCDC_ShutdownIsIdempotent(t *testing.T) {
+	cancelCalls := 0
+	cdc := &TubingCDC{handlerCancel: func() { cancelCalls++ }}
+	if err := cdc.Shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cdc.Shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	cdc.Close()
+	if cancelCalls != 1 {
+		t.Fatalf("cancel calls = %d, want 1", cancelCalls)
+	}
+	var nilCDC *TubingCDC
+	if err := nilCDC.Shutdown(); err != nil {
+		t.Fatal(err)
 	}
 }

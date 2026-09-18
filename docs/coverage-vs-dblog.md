@@ -9,9 +9,9 @@ DBLog combines (1) ordered row events from the database transaction log, (2) **c
 | Binlog position persistence for restarts | State store (ZK) | Badger + optional Redis (`PositionPersistence`) |
 | Full-state via chunked PK `SELECT` | Yes | Yes — `BuildPKOrderedChunkSelect`, `BuildPKRowsInSelect`, chunk driver (`StartAlgorithm1ChunkDriver`) |
 | Watermark table + low/high window + PK reconciliation | Yes (Algorithm 1) | Yes — P1 watermark + P3 `Algorithm1Tracker` + P4 driver; **built-in driver does not pause binlog consumption** (see [algorithm1-chunk-driver.md](algorithm1-chunk-driver.md)) |
-| Same envelope for log vs snapshot rows | Yes | Yes — P0 envelope; snapshot path passes `nil` `schema.Table` so `primary_key` may be empty unless extended |
+| Same envelope for log vs snapshot rows | Yes | Yes — envelope v1 includes source identity and unique log row coordinates; snapshot path passes `nil` `schema.Table` so `primary_key` may be empty unless extended |
 | Chunk progress, pause/resume, API triggers | Yes | Yes — `ChunkProgressStore`, `ChunkProcessingControl`, `FullStateJobQueue` / `PlanFullStateJobs` |
-| Active/passive HA | Yes | Redis leader lease (`RunTubingCDCWithLeaderElection`); not full ZK-style cluster metadata |
+| Active/passive HA | Yes | Redis leader lease (`RunTubingCDCWithLeaderElection`); not full ZK-style cluster metadata and does not issue fencing tokens to downstream sinks |
 | Multi-DB (e.g. PostgreSQL) | Discussed | No (MySQL only); P6 supports multiple MySQL sources |
 | Canal `mysqldump` dump path | N/A | Disabled (`Dump.ExecutionPath == ""` in `data_flow.go`) |
 

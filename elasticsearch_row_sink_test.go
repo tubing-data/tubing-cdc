@@ -115,6 +115,25 @@ func TestElasticsearchRowEventSink_Emit_deleteWithoutID(t *testing.T) {
 	}
 }
 
+func TestDefaultElasticsearchDocumentID_preservesLargeInteger(t *testing.T) {
+	id, ok := defaultElasticsearchDocumentID("db.t", "insert", []byte(`{"id":9007199254740993}`))
+	if !ok || id != "9007199254740993" {
+		t.Fatalf("id=%q ok=%v", id, ok)
+	}
+}
+
+func TestElasticsearchRowEventSink_DeleteNotFoundIsIdempotent(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	sink, err := NewElasticsearchRowEventSink(ElasticsearchSinkConfig{Addresses: []string{srv.URL}, Index: "t", HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Emit("db.t", "delete", []byte(`{"id":1}`)); err != nil {
+		t.Fatalf("replayed delete should succeed: %v", err)
+	}
+}
+
 func TestElasticsearchRowEventSink_Emit_httpFlow(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -298,6 +317,16 @@ func TestElasticsearchRowEventSink_Emit_latestEntityUpdate(t *testing.T) {
 	}
 	if _, exists := document.Data["before"]; exists {
 		t.Fatalf("latest entity must not contain before: %#v", document.Data)
+	}
+}
+
+func TestLatestEntityPayload_unwrapsEnvelope(t *testing.T) {
+	got, err := latestEntityPayload("update", []byte(`{"schema_version":"v","payload":{"before":{"id":1},"after":{"id":1,"status":"paid"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{"id":1,"status":"paid"}` {
+		t.Fatalf("got %s", got)
 	}
 }
 
