@@ -2,7 +2,11 @@ package tubing_cdc
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -13,17 +17,21 @@ import (
 )
 
 type TubingCDC struct {
-	river        *canal.Canal
-	posStore     *twoTierPositionStore
-	chunkStore   *ChunkProgressStore
-	sharedBadger *badger.DB
-	chunkControl *ChunkProcessingControl
-	fullStateQ   *FullStateJobQueue
-	fullSync     *fullSyncRuntime
+	river         *canal.Canal
+	sourceID      string
+	posStore      *twoTierPositionStore
+	chunkStore    *ChunkProgressStore
+	sharedBadger  *badger.DB
+	chunkControl  *ChunkProcessingControl
+	fullStateQ    *FullStateJobQueue
+	fullSync      *fullSyncRuntime
+	handlerCancel context.CancelFunc
 
 	drvMu            sync.Mutex
 	algoDriverCancel context.CancelFunc
 	algoDriverWG     sync.WaitGroup
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 type fullSyncRuntime struct {
@@ -36,6 +44,10 @@ type fullSyncRuntime struct {
 }
 
 func NewTubingCDC(cfg *Configs) (*TubingCDC, error) {
+	return newTubingCDC(cfg, nil)
+}
+
+func newTubingCDC(cfg *Configs, externalBadger map[string]*badger.DB) (*TubingCDC, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("configs is nil")
 	}
@@ -54,9 +66,19 @@ func NewTubingCDC(cfg *Configs) (*TubingCDC, error) {
 	}
 
 	cancalCfg := canal.NewDefaultConfig()
-	cancalCfg.Addr = cfg.Address
+	if strings.TrimSpace(cfg.Address) != "" {
+		cancalCfg.Addr = strings.TrimSpace(cfg.Address)
+	}
 	cancalCfg.User = cfg.Username
 	cancalCfg.Password = cfg.Password
+	if cfg.ServerID != 0 {
+		cancalCfg.ServerID = cfg.ServerID
+	} else if generated, ok := randomReplicationServerID(); ok {
+		cancalCfg.ServerID = generated
+	}
+	if cfg.BinlogReadTimeout > 0 {
+		cancalCfg.ReadTimeout = cfg.BinlogReadTimeout
+	}
 	cancalCfg.Dump.ExecutionPath = ""
 
 	for _, tbl := range cfg.Tables {
@@ -92,9 +114,33 @@ func NewTubingCDC(cfg *Configs) (*TubingCDC, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := river.CheckBinlogRowImage("FULL"); err != nil {
+		river.Close()
+		return nil, fmt.Errorf("tubingcdc: full binlog row image is required: %w", err)
+	}
 	handler := cfg.EventHandler
 	if handler == nil {
 		handler = &MyEventHandler{}
+	}
+	var handlerCancel context.CancelFunc
+	handlerReady := false
+	defer func() {
+		if !handlerReady && handlerCancel != nil {
+			handlerCancel()
+		}
+	}()
+	if dynamic, ok := handler.(*DynamicTableEventHandler); ok {
+		sourceID := strings.TrimSpace(cfg.SourceID)
+		if sourceID == "" {
+			sourceID = cancalCfg.Addr
+		}
+		dynamic.setSourceIDIfEmpty(sourceID)
+		handlerCtx, cancel := context.WithCancel(context.Background())
+		if dynamic.bindPipelineContextIfEmpty(handlerCtx) {
+			handlerCancel = cancel
+		} else {
+			cancel()
+		}
 	}
 
 	var fullSync *fullSyncRuntime
@@ -125,9 +171,50 @@ func NewTubingCDC(cfg *Configs) (*TubingCDC, error) {
 	posOn := cfg.PositionPersistence != nil && strings.TrimSpace(cfg.PositionPersistence.BadgerDir) != ""
 	chunkOn := cfg.ChunkProgressPersistence != nil
 
-	if posOn && chunkOn {
-		pDir := strings.TrimSpace(cfg.PositionPersistence.BadgerDir)
-		cDir := strings.TrimSpace(cfg.ChunkProgressPersistence.BadgerDir)
+	if externalBadger != nil {
+		if posOn {
+			pDir := strings.TrimSpace(cfg.PositionPersistence.BadgerDir)
+			db, oerr := sharedBadgerForDir(externalBadger, pDir)
+			if oerr != nil {
+				river.Close()
+				return nil, oerr
+			}
+			posStore, oerr = newTwoTierPositionStoreWithDB(db, cfg.PositionPersistence, false)
+			if oerr != nil {
+				river.Close()
+				return nil, oerr
+			}
+		}
+		if chunkOn {
+			cDir := strings.TrimSpace(cfg.ChunkProgressPersistence.BadgerDir)
+			db, oerr := sharedBadgerForDir(externalBadger, cDir)
+			if oerr != nil {
+				if posStore != nil {
+					_ = posStore.Close()
+				}
+				river.Close()
+				return nil, oerr
+			}
+			chunkStore, oerr = newChunkProgressStoreWithDB(db, cfg.ChunkProgressPersistence, false)
+			if oerr != nil {
+				if posStore != nil {
+					_ = posStore.Close()
+				}
+				river.Close()
+				return nil, oerr
+			}
+		}
+	} else if posOn && chunkOn {
+		pDir, err := canonicalBadgerDir(cfg.PositionPersistence.BadgerDir)
+		if err != nil {
+			river.Close()
+			return nil, err
+		}
+		cDir, err := canonicalBadgerDir(cfg.ChunkProgressPersistence.BadgerDir)
+		if err != nil {
+			river.Close()
+			return nil, err
+		}
 		if pDir == cDir {
 			var oerr error
 			sharedDB, oerr = openBadgerDB(pDir)
@@ -186,23 +273,78 @@ func NewTubingCDC(cfg *Configs) (*TubingCDC, error) {
 	}
 	river.SetEventHandler(handler)
 
-	return &TubingCDC{
-		river:        river,
-		posStore:     posStore,
-		chunkStore:   chunkStore,
-		sharedBadger: sharedDB,
-		chunkControl: cfg.ChunkProcessingControl,
-		fullStateQ:   cfg.FullStateJobQueue,
-		fullSync:     fullSync,
-	}, nil
+	result := &TubingCDC{
+		river:         river,
+		sourceID:      resolvedSourceID(cfg, cancalCfg.Addr),
+		posStore:      posStore,
+		chunkStore:    chunkStore,
+		sharedBadger:  sharedDB,
+		chunkControl:  cfg.ChunkProcessingControl,
+		fullStateQ:    cfg.FullStateJobQueue,
+		fullSync:      fullSync,
+		handlerCancel: handlerCancel,
+	}
+	handlerReady = true
+	return result, nil
+}
+
+func sharedBadgerForDir(dbs map[string]*badger.DB, dir string) (*badger.DB, error) {
+	var err error
+	dir, err = canonicalBadgerDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	if db := dbs[dir]; db != nil {
+		return db, nil
+	}
+	db, err := openBadgerDB(dir)
+	if err != nil {
+		return nil, err
+	}
+	dbs[dir] = db
+	return db, nil
+}
+
+func canonicalBadgerDir(dir string) (string, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "", fmt.Errorf("shared badger: directory is empty")
+	}
+	abs, err := filepath.Abs(filepath.Clean(dir))
+	if err != nil {
+		return "", fmt.Errorf("resolve badger directory %q: %w", dir, err)
+	}
+	return abs, nil
+}
+
+func resolvedSourceID(cfg *Configs, fallback string) string {
+	if cfg != nil {
+		if sourceID := strings.TrimSpace(cfg.SourceID); sourceID != "" {
+			return sourceID
+		}
+	}
+	return strings.TrimSpace(fallback)
 }
 
 func tableIncludeRegex(dbTable string) (string, error) {
+	dbTable = strings.TrimSpace(dbTable)
 	parts := strings.SplitN(dbTable, ".", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", fmt.Errorf("tables entry must be database.table, got %q", dbTable)
 	}
-	return regexp.QuoteMeta(parts[0]) + `\.` + regexp.QuoteMeta(parts[1]), nil
+	return `^` + regexp.QuoteMeta(parts[0]) + `\.` + regexp.QuoteMeta(parts[1]) + `$`, nil
+}
+
+func randomReplicationServerID() (uint32, bool) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0, false
+	}
+	id := binary.BigEndian.Uint32(b[:])
+	if id == 0 {
+		id = 1
+	}
+	return id, true
 }
 
 func (t *TubingCDC) Run() error {
@@ -251,12 +393,11 @@ func RunTubingCDCWithRecovery(ctx context.Context, cfg *Configs) error {
 	}()
 	select {
 	case <-ctx.Done():
-		cdc.Close()
+		shutdownErr := cdc.Shutdown()
 		<-runErr
-		return ctx.Err()
+		return errors.Join(ctx.Err(), shutdownErr)
 	case err := <-runErr:
-		cdc.Close()
-		return err
+		return errors.Join(err, cdc.Shutdown())
 	}
 }
 
@@ -279,7 +420,7 @@ func (t *TubingCDC) runFromWithFullSync(pos mysql.Position) error {
 	}
 	fs.queue.Enqueue(jobs...)
 	err = t.StartAlgorithm1ChunkDriver(context.Background(), Algorithm1ChunkDriverConfig{
-		Watermark: fs.watermark, Tracker: fs.tracker, RowSink: fs.cfg.RowSink,
+		Watermark: fs.watermark, Tracker: fs.tracker, SourceID: t.sourceID, RowSink: fs.cfg.RowSink,
 		UseEnvelope: fs.cfg.UseEnvelope, JobQueue: fs.queue, ChunkStore: t.chunkStore,
 		Control: t.chunkControl, PhaseWaitTimeout: fs.cfg.PhaseWaitTimeout,
 		ErrorPolicy: fs.cfg.ErrorPolicy, stopWhenQueueEmpty: true, done: fs.done,
@@ -311,22 +452,47 @@ func (t *TubingCDC) Canal() *canal.Canal {
 }
 
 func (t *TubingCDC) Close() {
-	t.StopAlgorithm1ChunkDriver()
-	// Close canal while position/chunk Badger stores are still open: canal.Close may invoke
-	// OnPosSynced on the handler chain, which must not run against a nil or closed Badger DB.
-	t.river.Close()
-	if t.posStore != nil {
-		_ = t.posStore.Close()
-		t.posStore = nil
+	_ = t.Shutdown()
+}
+
+// Shutdown idempotently stops the CDC instance and reports persistence close or
+// final-flush errors. Close is retained as the no-error compatibility wrapper.
+func (t *TubingCDC) Shutdown() error {
+	if t == nil {
+		return nil
 	}
-	if t.chunkStore != nil {
-		_ = t.chunkStore.Close()
-		t.chunkStore = nil
-	}
-	if t.sharedBadger != nil {
-		_ = t.sharedBadger.Close()
-		t.sharedBadger = nil
-	}
+	t.closeOnce.Do(func() {
+		if t.handlerCancel != nil {
+			t.handlerCancel()
+		}
+		t.StopAlgorithm1ChunkDriver()
+		// Close canal while position/chunk Badger stores are still open: canal.Close may invoke
+		// OnPosSynced on the handler chain, which must not run against a nil or closed Badger DB.
+		if t.river != nil {
+			t.river.Close()
+		}
+		var errs []error
+		if t.posStore != nil {
+			if err := t.posStore.Close(); err != nil {
+				errs = append(errs, err)
+			}
+			t.posStore = nil
+		}
+		if t.chunkStore != nil {
+			if err := t.chunkStore.Close(); err != nil {
+				errs = append(errs, err)
+			}
+			t.chunkStore = nil
+		}
+		if t.sharedBadger != nil {
+			if err := t.sharedBadger.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close shared badger: %w", err))
+			}
+			t.sharedBadger = nil
+		}
+		t.closeErr = errors.Join(errs...)
+	})
+	return t.closeErr
 }
 
 // ChunkProgressStore returns the P2 chunk cursor store when Configs.ChunkProgressPersistence was set, or nil.
@@ -377,6 +543,9 @@ func (t *TubingCDC) EnqueueFullStateJobs(cfg *FullStateCaptureConfig, opts PlanF
 func (t *TubingCDC) StartAlgorithm1ChunkDriver(ctx context.Context, cfg Algorithm1ChunkDriverConfig) error {
 	if t == nil || t.river == nil {
 		return fmt.Errorf("tubing cdc: nil receiver or canal")
+	}
+	if ctx == nil {
+		return fmt.Errorf("tubing cdc: context is nil")
 	}
 	if err := cfg.validate(); err != nil {
 		return err

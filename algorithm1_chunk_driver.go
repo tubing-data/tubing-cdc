@@ -29,6 +29,8 @@ const (
 type Algorithm1ChunkDriverConfig struct {
 	Watermark *WatermarkTableConfig
 	Tracker   *Algorithm1Tracker
+	// SourceID is included in snapshot envelopes and their stable event IDs.
+	SourceID string
 	// TargetTableKey is the fully qualified table captured by Algorithm1 (same as Algorithm1Config.TargetTableKey).
 	TargetTableKey string
 	RowSink        RowEventSink
@@ -71,6 +73,11 @@ func (c Algorithm1ChunkDriverConfig) validate() error {
 	}
 	if c.JobQueue == nil {
 		return fmt.Errorf("algorithm1 driver: JobQueue is nil")
+	}
+	switch c.ErrorPolicy {
+	case Algorithm1DriverStopOnError, Algorithm1DriverContinueOnError:
+	default:
+		return fmt.Errorf("algorithm1 driver: invalid ErrorPolicy %d", c.ErrorPolicy)
 	}
 	return nil
 }
@@ -211,7 +218,7 @@ func (d *algorithm1ChunkDriver) runChunkedTable(ctx context.Context, spec FullSt
 		if runErr != nil {
 			rec, err := d.cfg.ChunkStore.Get(spec.TableKey, spec.RunID)
 			if err != nil {
-				rec = ChunkProgressRecord{TableKey: spec.TableKey, RunID: spec.RunID, ChunkSize: spec.ChunkSize}
+				rec = ChunkProgressRecord{TableKey: spec.TableKey, RunID: spec.RunID, ChunkSize: spec.ChunkSize, PKColumns: append([]string(nil), spec.PKColumns...)}
 			}
 			rec.Status = ChunkProgressFailed
 			rec.LastError = runErr.Error()
@@ -249,7 +256,7 @@ func (d *algorithm1ChunkDriver) runChunkedTable(ctx context.Context, spec FullSt
 		}
 
 		for _, row := range cycle.Reconciled {
-			if err := emitSnapshotRow(d.cfg.RowSink, spec.TableKey, d.cfg.UseEnvelope, row); err != nil {
+			if err := emitSnapshotRowWithSource(d.cfg.RowSink, spec.TableKey, d.cfg.SourceID, d.cfg.UseEnvelope, row); err != nil {
 				d.cfg.Tracker.Reset()
 				return err
 			}
@@ -257,7 +264,7 @@ func (d *algorithm1ChunkDriver) runChunkedTable(ctx context.Context, spec FullSt
 
 		raw := cycle.Raw
 		if len(raw) == 0 {
-			return d.cfg.ChunkStore.Put(ChunkProgressRecord{TableKey: spec.TableKey, RunID: spec.RunID, ChunkSize: spec.ChunkSize, AfterPK: rec.AfterPK, Status: ChunkProgressCompleted, UpdatedAt: time.Now().UTC()})
+			return d.cfg.ChunkStore.Put(ChunkProgressRecord{TableKey: spec.TableKey, RunID: spec.RunID, ChunkSize: spec.ChunkSize, PKColumns: append([]string(nil), spec.PKColumns...), AfterPK: rec.AfterPK, Status: ChunkProgressCompleted, UpdatedAt: time.Now().UTC()})
 		}
 
 		lastPK, err := pkTupleFromRowMap(spec.PKColumns, raw[len(raw)-1])
@@ -268,6 +275,7 @@ func (d *algorithm1ChunkDriver) runChunkedTable(ctx context.Context, spec FullSt
 			TableKey:  spec.TableKey,
 			RunID:     spec.RunID,
 			ChunkSize: spec.ChunkSize,
+			PKColumns: append([]string(nil), spec.PKColumns...),
 			AfterPK:   lastPK,
 			Status:    ChunkProgressRunning,
 			UpdatedAt: time.Now().UTC(),
@@ -307,7 +315,7 @@ func (d *algorithm1ChunkDriver) runSelectedPKs(ctx context.Context, spec FullSta
 		return err
 	}
 	for _, row := range cycle.Reconciled {
-		if err := emitSnapshotRow(d.cfg.RowSink, spec.TableKey, d.cfg.UseEnvelope, row); err != nil {
+		if err := emitSnapshotRowWithSource(d.cfg.RowSink, spec.TableKey, d.cfg.SourceID, d.cfg.UseEnvelope, row); err != nil {
 			return err
 		}
 	}
@@ -317,6 +325,12 @@ func (d *algorithm1ChunkDriver) runSelectedPKs(ctx context.Context, spec FullSta
 func (d *algorithm1ChunkDriver) loadChunkCursor(spec FullStateTableSpec) (ChunkProgressRecord, error) {
 	rec, err := d.cfg.ChunkStore.Get(spec.TableKey, spec.RunID)
 	if err == nil {
+		if rec.ChunkSize != spec.ChunkSize {
+			return ChunkProgressRecord{}, fmt.Errorf("algorithm1 driver: stored chunk size %d does not match configured size %d", rec.ChunkSize, spec.ChunkSize)
+		}
+		if len(rec.PKColumns) != 0 && !sameStrings(rec.PKColumns, spec.PKColumns) {
+			return ChunkProgressRecord{}, fmt.Errorf("algorithm1 driver: stored pk columns %v do not match configured columns %v", rec.PKColumns, spec.PKColumns)
+		}
 		return rec, nil
 	}
 	if err != ErrChunkProgressNotFound {
@@ -326,9 +340,22 @@ func (d *algorithm1ChunkDriver) loadChunkCursor(spec FullStateTableSpec) (ChunkP
 		TableKey:  spec.TableKey,
 		RunID:     spec.RunID,
 		ChunkSize: spec.ChunkSize,
+		PKColumns: append([]string(nil), spec.PKColumns...),
 		AfterPK:   nil,
 		Status:    ChunkProgressRunning,
 	}, nil
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if strings.TrimSpace(a[i]) != strings.TrimSpace(b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *algorithm1ChunkDriver) writeWatermark(ctx context.Context, value string) error {
@@ -432,6 +459,10 @@ func pkTupleFromRowMap(pkColumns []string, row map[string]any) ([]any, error) {
 }
 
 func emitSnapshotRow(sink RowEventSink, tableKey string, useEnvelope bool, row map[string]any) error {
+	return emitSnapshotRowWithSource(sink, tableKey, "", useEnvelope, row)
+}
+
+func emitSnapshotRowWithSource(sink RowEventSink, tableKey, sourceID string, useEnvelope bool, row map[string]any) error {
 	if sink == nil || row == nil {
 		return nil
 	}
@@ -440,8 +471,9 @@ func emitSnapshotRow(sink RowEventSink, tableKey string, useEnvelope bool, row m
 		return fmt.Errorf("algorithm1 driver: marshal row: %w", err)
 	}
 	if useEnvelope {
-		wrapped, werr := MarshalCDCEventEnvelope(
+		wrapped, werr := marshalCDCEventEnvelopeWithCoordinates(
 			DefaultEnvelopeSchemaVersion,
+			sourceID,
 			OriginSnapshot,
 			canal.InsertAction,
 			tableKey,
@@ -450,6 +482,7 @@ func emitSnapshotRow(sink RowEventSink, tableKey string, useEnvelope bool, row m
 			b,
 			nil,
 			nil,
+			0,
 		)
 		if werr != nil {
 			return fmt.Errorf("algorithm1 driver: envelope: %w", werr)

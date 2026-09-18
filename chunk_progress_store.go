@@ -139,6 +139,9 @@ func (s *ChunkProgressStore) Get(tableKey, runID string) (ChunkProgressRecord, e
 		}
 		return zero, fmt.Errorf("chunk progress: read: %w", err)
 	}
+	if err := rec.Validate(); err != nil {
+		return zero, fmt.Errorf("chunk progress: invalid stored record: %w", err)
+	}
 	return rec, nil
 }
 
@@ -204,6 +207,9 @@ func ReadChunkProgressFromBadger(badgerDir, badgerKeyPrefix, tableKey, runID str
 			return zero, ErrChunkProgressNotFound
 		}
 		return zero, fmt.Errorf("read chunk progress: %w", err)
+	}
+	if err := rec.Validate(); err != nil {
+		return zero, fmt.Errorf("read chunk progress: invalid stored record: %w", err)
 	}
 	return rec, nil
 }

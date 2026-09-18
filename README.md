@@ -141,7 +141,7 @@ enabled. A Docker-based local environment is available with `make demo`; see the
 
 - Go 1.21 or later
 - MySQL with binary logging enabled
-- Row-based binlog format
+- Row-based binlog format with `binlog_row_image=FULL` (validated when the client is created)
 - A MySQL account with `SELECT`, `REPLICATION SLAVE`, and `REPLICATION CLIENT` privileges
 
 Every configured table must use the fully qualified `database.table` form.
@@ -182,13 +182,18 @@ func main() {
 		Address:      "127.0.0.1:3306",
 		Username:     "cdc_user",
 		Password:     "secret",
+		SourceID:     "orders-primary",
 		Tables:       tables,
 		EventHandler: handler,
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer cdc.Close()
+	defer func() {
+		if err := cdc.Shutdown(); err != nil {
+			log.Printf("shutdown: %v", err)
+		}
+	}()
 
 	// Run blocks while following the MySQL binlog.
 	if err := cdc.Run(); err != nil {
@@ -199,9 +204,9 @@ func main() {
 
 Use `RunFrom(mysql.Position)` when the application needs to resume from a known binlog position. For durable checkpointing, configure position persistence as shown below, read the saved position on startup, and pass it to `RunFrom`.
 
-Alternatively, `RunTubingCDCWithRecovery(ctx, cfg)` performs that lookup automatically. It prefers
-the Redis checkpoint when configured, falls back to local Badger, and starts at the current master
-position only when no checkpoint exists.
+Alternatively, `RunTubingCDCWithRecovery(ctx, cfg)` performs that lookup automatically. It compares
+the Redis and local Badger checkpoints when both exist, resumes from the newer safely comparable
+position, and starts at the current master position only when no checkpoint exists.
 
 ## Event model
 
@@ -209,7 +214,8 @@ position only when no checkpoint exists.
 
 ```json
 {
-  "schema_version": "tubing-cdc-envelope-v0",
+  "schema_version": "tubing-cdc-envelope-v1",
+  "source_id": "orders-primary",
   "origin": "log",
   "action": "insert",
   "table": {
@@ -218,6 +224,10 @@ position only when no checkpoint exists.
   },
   "primary_key": {
     "id": 42
+  },
+  "position": {
+    "file": "mysql-bin.000007",
+    "pos": 900
   },
   "payload": {
     "id": 42,
@@ -260,7 +270,7 @@ cfg.PositionPersistence = &tubingcdc.PositionPersistence{
 }
 ```
 
-Always call `Close` during shutdown so the final position is flushed and storage resources are released. See [position persistence](docs/position-persistence.md) for recovery examples and storage semantics.
+Always call `Shutdown` during shutdown so the final position is flushed, close errors are reported, and storage resources are released. `Close` remains available as a compatibility wrapper that discards the error. See [position persistence](docs/position-persistence.md) for recovery examples and storage semantics.
 
 ## DBLog-style snapshots and high availability
 
@@ -305,7 +315,7 @@ During FullSync, binlog consumption is not stopped. For each chunk, changes betw
 
 ## Multiple MySQL sources
 
-`MultiMySQLCDC` runs one independent `TubingCDC` instance per source. Give each source a stable ID and call `ApplyMySQLSourcePersistenceScope` when instances share a Badger directory or Redis key space.
+`MultiMySQLCDC` runs one independent `TubingCDC` instance per source. Each source ID automatically scopes default Badger/Redis keys, becomes the event-envelope `source_id`, and allows all sources that name the same Badger directory to share one database handle. Explicit custom keys must still be unique; construction fails on collisions. `ApplyMySQLSourcePersistenceScope` remains useful when configuring independent `TubingCDC` instances yourself.
 
 ```go
 sources := []tubingcdc.MySQLSourceSpec{
@@ -313,20 +323,15 @@ sources := []tubingcdc.MySQLSourceSpec{
 	{ID: "billing-primary", Config: billingConfig},
 }
 
-for i := range sources {
-	if err := tubingcdc.ApplyMySQLSourcePersistenceScope(
-		sources[i].Config,
-		sources[i].ID,
-	); err != nil {
-		log.Fatal(err)
-	}
-}
-
 multi, err := tubingcdc.NewMultiMySQLCDC(sources)
 if err != nil {
 	log.Fatal(err)
 }
-defer multi.Close()
+defer func() {
+	if err := multi.Shutdown(); err != nil {
+		log.Printf("shutdown: %v", err)
+	}
+}()
 
 if err := multi.Run(context.Background()); err != nil {
 	log.Fatal(err)

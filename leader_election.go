@@ -53,6 +53,9 @@ func (c *LeaderElectionConfig) validate() error {
 	if c.Lease < 3*time.Second {
 		return fmt.Errorf("leader election: Lease must be at least 3s")
 	}
+	if c.RenewInterval <= 0 || c.RenewInterval >= c.Lease {
+		return fmt.Errorf("leader election: RenewInterval must be positive and less than Lease")
+	}
 	return nil
 }
 
@@ -63,10 +66,10 @@ func (c *LeaderElectionConfig) applyDefaults() {
 	if c.Lease == 0 {
 		c.Lease = 15 * time.Second
 	}
-	if c.RenewInterval <= 0 {
+	if c.RenewInterval == 0 {
 		c.RenewInterval = c.Lease / 3
 	}
-	if c.RenewInterval < time.Second {
+	if c.RenewInterval > 0 && c.RenewInterval < time.Second {
 		c.RenewInterval = time.Second
 	}
 	if c.AcquireRetryInterval <= 0 {
@@ -89,6 +92,9 @@ func RunTubingCDCWithLeaderElectionFrom(ctx context.Context, cfg *Configs, pos m
 }
 
 func runTubingCDCWithLeaderElection(ctx context.Context, cfg *Configs, pos *mysql.Position) error {
+	if ctx == nil {
+		return fmt.Errorf("tubingcdc: context is nil")
+	}
 	if cfg == nil {
 		return fmt.Errorf("tubingcdc: configs is nil")
 	}
@@ -150,15 +156,21 @@ func runOneCDCLeaderTerm(ctx context.Context, cfg *Configs, pos *mysql.Position,
 	}()
 	select {
 	case <-ctx.Done():
-		cdc.Close()
+		shutdownErr := cdc.Shutdown()
 		<-runErr
-		return ctx.Err()
+		return errors.Join(ctx.Err(), shutdownErr)
 	case <-sess.Lost():
-		cdc.Close()
+		shutdownErr := cdc.Shutdown()
 		<-runErr
+		if shutdownErr != nil {
+			return fmt.Errorf("tubingcdc: shutdown after leadership loss: %v", shutdownErr)
+		}
 		return ErrLeadershipLost
 	case err := <-runErr:
-		cdc.Close()
+		shutdownErr := cdc.Shutdown()
+		if shutdownErr != nil {
+			return errors.Join(err, shutdownErr)
+		}
 		if err != nil {
 			return err
 		}

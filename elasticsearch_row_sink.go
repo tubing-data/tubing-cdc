@@ -155,8 +155,17 @@ func elasticsearchEnvelopeJSON(tableKey, action string, payloadJSON []byte) ([]b
 func defaultElasticsearchDocumentID(tableKey, action string, payloadJSON []byte) (string, bool) {
 	_ = tableKey
 	var v any
-	if err := json.Unmarshal(payloadJSON, &v); err != nil {
+	if err := decodeJSONPreservingNumbers(payloadJSON, &v); err != nil {
 		return "", false
+	}
+	if envelope, ok := v.(map[string]any); ok {
+		if _, hasSchemaVersion := envelope["schema_version"]; hasSchemaVersion {
+			if payload, ok := envelope["payload"]; ok {
+				if nested, err := json.Marshal(payload); err == nil {
+					return defaultElasticsearchDocumentID(tableKey, action, nested)
+				}
+			}
+		}
 	}
 	if action == "update" {
 		m, ok := v.(map[string]any)
@@ -183,7 +192,10 @@ func defaultElasticsearchDocumentID(tableKey, action string, payloadJSON []byte)
 func pickElasticsearchRowID(m map[string]any) (string, bool) {
 	for _, key := range []string{"id", "_id", "pk"} {
 		if val, ok := m[key]; ok && val != nil {
-			return fmt.Sprint(val), true
+			id := strings.TrimSpace(fmt.Sprint(val))
+			if id != "" {
+				return id, true
+			}
 		}
 	}
 	return "", false
@@ -265,6 +277,12 @@ func (s *ElasticsearchRowEventSink) Emit(tableKey, action string, payloadJSON []
 }
 
 func latestEntityPayload(action string, payloadJSON []byte) ([]byte, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(payloadJSON, &envelope); err == nil {
+		if _, hasSchemaVersion := envelope["schema_version"]; hasSchemaVersion && len(envelope["payload"]) != 0 {
+			return latestEntityPayload(action, envelope["payload"])
+		}
+	}
 	if action != "update" {
 		return payloadJSON, nil
 	}
@@ -286,9 +304,18 @@ func (s *ElasticsearchRowEventSink) doElasticsearchRequest(req *http.Request) er
 		return fmt.Errorf("elasticsearch sink: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	slurp, _ := io.ReadAll(resp.Body)
+	slurp, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
 	}
+	if req.Method == http.MethodDelete && resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
 	return fmt.Errorf("elasticsearch sink: %s: %s", resp.Status, bytes.TrimSpace(slurp))
+}
+
+func decodeJSONPreservingNumbers(payload []byte, dst any) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	return decoder.Decode(dst)
 }

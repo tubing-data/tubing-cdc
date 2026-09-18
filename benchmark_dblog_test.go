@@ -61,7 +61,9 @@ func BenchmarkReconcileChunkRows(b *testing.B) {
 				}
 				if tt.conflictEvery > 0 {
 					for j := 0; j < tt.nRows; j += tt.conflictEvery {
-						tr.RecordTargetRowChange("db.t", rows[j])
+						if err := tr.RecordTargetRowChange("db.t", rows[j]); err != nil {
+							b.Fatal(err)
+						}
 					}
 				}
 				if err := tr.OnWatermark(WatermarkBinlogEvent{NewValue: "high-u"}); err != nil {

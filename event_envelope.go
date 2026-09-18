@@ -13,8 +13,8 @@ import (
 	"github.com/go-mysql-org/go-mysql/canal"
 )
 
-// DefaultEnvelopeSchemaVersion is the JSON envelope schema_version for P0 (DBLog-aligned shape).
-const DefaultEnvelopeSchemaVersion = "tubing-cdc-envelope-v0"
+// DefaultEnvelopeSchemaVersion is the JSON envelope schema_version for the DBLog-aligned shape.
+const DefaultEnvelopeSchemaVersion = "tubing-cdc-envelope-v1"
 
 // EventOrigin distinguishes replication-log rows from future chunked snapshot rows (DBLog).
 type EventOrigin string
@@ -55,25 +55,35 @@ type BinlogPosition struct {
 type CDCEventEnvelope struct {
 	EventID       string          `json:"event_id,omitempty"`
 	SchemaVersion string          `json:"schema_version"`
+	SourceID      string          `json:"source_id,omitempty"`
 	Origin        EventOrigin     `json:"origin"`
 	Action        string          `json:"action"`
 	Table         TableIdentity   `json:"table"`
 	PrimaryKey    map[string]any  `json:"primary_key,omitempty"`
 	Position      *BinlogPosition `json:"position,omitempty"`
+	RowOrdinal    int             `json:"row_ordinal,omitempty"`
 	Payload       json.RawMessage `json:"payload"`
 }
 
 // StableEventID returns a deterministic ID for idempotent downstream processing. Replaying the
 // same event with the same source coordinates and payload produces the same ID.
 func StableEventID(origin EventOrigin, action, tableKey string, primaryKey map[string]any, position *BinlogPosition, payloadJSON []byte) string {
+	return StableEventIDWithCoordinates("", origin, action, tableKey, primaryKey, position, 0, payloadJSON)
+}
+
+// StableEventIDWithCoordinates extends StableEventID with a stable source identifier and
+// the logical row ordinal inside a multi-row binlog event.
+func StableEventIDWithCoordinates(sourceID string, origin EventOrigin, action, tableKey string, primaryKey map[string]any, position *BinlogPosition, rowOrdinal int, payloadJSON []byte) string {
 	canonical := struct {
+		SourceID   string          `json:"source_id,omitempty"`
 		Origin     EventOrigin     `json:"origin"`
 		Action     string          `json:"action"`
 		Table      string          `json:"table"`
 		PrimaryKey map[string]any  `json:"primary_key,omitempty"`
 		Position   *BinlogPosition `json:"position,omitempty"`
+		RowOrdinal int             `json:"row_ordinal,omitempty"`
 		Payload    json.RawMessage `json:"payload"`
-	}{origin, action, tableKey, primaryKey, position, json.RawMessage(payloadJSON)}
+	}{sourceID, origin, action, tableKey, primaryKey, position, rowOrdinal, json.RawMessage(payloadJSON)}
 	b, _ := json.Marshal(canonical)
 	sum := sha256.Sum256(b)
 	return fmt.Sprintf("%x", sum[:])
@@ -147,6 +157,21 @@ func MarshalCDCEventEnvelope(
 	replicationPos *mysql.Position,
 	header *replication.EventHeader,
 ) ([]byte, error) {
+	return marshalCDCEventEnvelopeWithCoordinates(schemaVersion, "", origin, action, tableKey, tbl, resolvedPayload, innerPayloadJSON, replicationPos, header, 0)
+}
+
+func marshalCDCEventEnvelopeWithCoordinates(
+	schemaVersion string,
+	sourceID string,
+	origin EventOrigin,
+	action, tableKey string,
+	tbl *schema.Table,
+	resolvedPayload any,
+	innerPayloadJSON []byte,
+	replicationPos *mysql.Position,
+	header *replication.EventHeader,
+	rowOrdinal int,
+) ([]byte, error) {
 	if schemaVersion == "" {
 		schemaVersion = DefaultEnvelopeSchemaVersion
 	}
@@ -156,13 +181,15 @@ func MarshalCDCEventEnvelope(
 	}
 	env := CDCEventEnvelope{
 		SchemaVersion: schemaVersion,
+		SourceID:      sourceID,
 		Origin:        origin,
 		Action:        action,
 		Table:         id,
 		PrimaryKey:    PrimaryKeyFromResolvedPayload(tbl, action, resolvedPayload),
 		Position:      BinlogPositionFromSources(replicationPos, header),
+		RowOrdinal:    rowOrdinal,
 		Payload:       json.RawMessage(append([]byte(nil), innerPayloadJSON...)),
 	}
-	env.EventID = StableEventID(origin, action, tableKey, env.PrimaryKey, env.Position, innerPayloadJSON)
+	env.EventID = StableEventIDWithCoordinates(sourceID, origin, action, tableKey, env.PrimaryKey, env.Position, rowOrdinal, innerPayloadJSON)
 	return json.Marshal(env)
 }

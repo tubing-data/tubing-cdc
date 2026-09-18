@@ -6,7 +6,7 @@
   - Logs a **Go struct snippet** once per table (approximate field types for readability).
   - Emits **each row event as JSON** through a pluggable **`RowEventSink`**; `update` events include `before` and `after` objects.
   - Optionally applies **destination field transforms** (`WithRowFieldTransformRules`) so you can derive or reshape columns before JSON reaches the sink.
-  - Optionally wraps each emitted JSON in a **DBLog-aligned envelope** (`WithDBLogEnvelope(true)`): `schema_version`, `origin`, `action`, `table`, `primary_key`, optional `position`, and nested **`payload`** (the legacy row JSON). See [event-envelope.md](event-envelope.md).
+  - Optionally wraps each emitted JSON in a **DBLog-aligned envelope** (`WithDBLogEnvelope(true)`): `schema_version`, `source_id`, `origin`, `action`, `table`, `primary_key`, optional `position`/`row_ordinal`, and nested **`payload`** (the legacy row JSON). See [event-envelope.md](event-envelope.md).
 
 Pass the same `[]string` you use for `Configs.Tables` so only registered tables are processed, or pass `nil`/empty to allow every table that appears in events.
 
@@ -84,7 +84,7 @@ By default, row JSON goes to **`LoggerRowSink`** (same `[CDC] action table …` 
 |------|------|
 | **`LoggerRowSink`** | Default when no option is passed; uses structured log lines. |
 | **`StdoutRowSink`** | Writes one line per event to an `io.Writer` (defaults to `os.Stdout`). Optional: set `Writer` to a file or buffer. |
-| **`KafkaRowEventSink`** | Publishes each event to Kafka (`segmentio/kafka-go`): message **key** = fully qualified table name, **value** = JSON payload, header **`cdc_action`** = canal action. Call **`Close()`** on shutdown. |
+| **`KafkaRowEventSink`** | Publishes each event to Kafka (`segmentio/kafka-go`): message **key** = fully qualified table name, **value** = JSON payload, header **`cdc_action`** = canal action. The default hash balancer keeps equal keys on one partition; set `MessageKey` for primary-key-level ordering or `Balancer` for another policy. Call **`Close()`** on shutdown. |
 | **`ElasticsearchRowEventSink`** | Indexes each row via the Elasticsearch HTTP API (`PUT`/`POST`/`DELETE` …`/_doc`). Configure cluster **`Addresses`** (first entry is used), **`Index`** or **`IndexResolver`**, optional **`DocumentID`** (see **`JoinElasticsearchDocumentID`**), **`StoreLatestEntity`**, **`Refresh`**, **`Username`**/**`Password`**, or **`APIKey`**. For a local cluster, run **`docker compose up -d elasticsearch`** (see [development.md](development.md)). |
 
 Implement **`RowEventSink`** yourself (`Emit(tableKey, action string, payloadJSON []byte) error`) for other systems (HTTP, Pulsar, etc.). With **`WithDBLogEnvelope(true)`**, `payloadJSON` is the **full envelope object**; `tableKey` and `action` are still passed the same way (for example Kafka still sets key and `cdc_action` header from them).
@@ -152,7 +152,7 @@ h := tubingcdc.NewDynamicTableEventHandler(tables,
 )
 ```
 
-Downstream code can branch on **`schema_version`** or parse the inner row from **`payload`**. Built-in **Kafka** and **Elasticsearch** sinks still send the message body as-is; if you index envelope-shaped documents, you may want a custom **`DocumentID`** or a wrapper sink that unwraps `payload` first.
+Downstream code can branch on **`schema_version`** or parse the inner row from **`payload`**. Built-in **Kafka** sends the envelope unchanged. **Elasticsearch** stores the full envelope by default, while its default document-ID extraction and `StoreLatestEntity` mode automatically inspect `payload`; custom `DocumentID` callbacks still receive the original JSON.
 
 ## Destination field transforms (`WithRowFieldTransformRules`)
 

@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/redis/go-redis/v9"
+	"github.com/siddontang/go-log/log"
 )
 
 const (
@@ -114,9 +117,9 @@ func newTwoTierPositionStoreWithDB(db *badger.DB, cfg *PositionPersistence, ownD
 		cancel:    cancel,
 	}
 
-	if cfg.RedisAddr != "" {
+	if strings.TrimSpace(cfg.RedisAddr) != "" {
 		s.rdb = redis.NewClient(&redis.Options{
-			Addr:     cfg.RedisAddr,
+			Addr:     strings.TrimSpace(cfg.RedisAddr),
 			Password: cfg.RedisPassword,
 			DB:       cfg.RedisDB,
 		})
@@ -128,6 +131,9 @@ func newTwoTierPositionStoreWithDB(db *badger.DB, cfg *PositionPersistence, ownD
 }
 
 func (s *twoTierPositionStore) onCommitted(pos mysql.Position, gtid mysql.GTIDSet) error {
+	if strings.TrimSpace(pos.Name) == "" {
+		return fmt.Errorf("persist binlog state: empty binlog file")
+	}
 	rec := BinlogStateRecord{
 		File:       pos.Name,
 		Pos:        pos.Pos,
@@ -180,7 +186,9 @@ func (s *twoTierPositionStore) redisFlushLoop() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			_ = s.flushRedis(s.ctx)
+			if err := s.flushRedis(s.ctx); err != nil && s.ctx.Err() == nil {
+				log.Errorf("[CDC] periodic Redis position flush failed: %v", err)
+			}
 		}
 	}
 }
@@ -195,9 +203,10 @@ func (s *twoTierPositionStore) Close() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = s.flushRedis(ctx)
-
 	var firstErr error
+	if err := s.flushRedis(ctx); err != nil {
+		firstErr = err
+	}
 	if s.ownDB && s.db != nil {
 		if err := s.db.Close(); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("close badger: %w", err)
@@ -245,6 +254,9 @@ func ReadBinlogStateFromBadger(badgerDir, badgerKey string) (mysql.Position, str
 		}
 		return mysql.Position{}, "", fmt.Errorf("read badger: %w", err)
 	}
+	if err := validateBinlogStateRecord(rec); err != nil {
+		return mysql.Position{}, "", fmt.Errorf("decode Badger position: %w", err)
+	}
 	return mysql.Position{Name: rec.File, Pos: rec.Pos}, rec.GTID, nil
 }
 
@@ -270,38 +282,93 @@ func ReadBinlogStateFromRedis(ctx context.Context, cfg *PositionPersistence) (my
 	if err := json.Unmarshal(b, &rec); err != nil {
 		return mysql.Position{}, "", fmt.Errorf("decode Redis position: %w", err)
 	}
-	if rec.File == "" {
-		return mysql.Position{}, "", fmt.Errorf("decode Redis position: empty binlog file")
+	if err := validateBinlogStateRecord(rec); err != nil {
+		return mysql.Position{}, "", fmt.Errorf("decode Redis position: %w", err)
 	}
 	return mysql.Position{Name: rec.File, Pos: rec.Pos}, rec.GTID, nil
+}
+
+func validateBinlogStateRecord(rec BinlogStateRecord) error {
+	if strings.TrimSpace(rec.File) == "" {
+		return fmt.Errorf("empty binlog file")
+	}
+	return nil
 }
 
 func readPersistedBinlogPosition(ctx context.Context, cfg *PositionPersistence) (mysql.Position, bool, error) {
 	if cfg == nil {
 		return mysql.Position{}, false, nil
 	}
-	if cfg.RedisAddr != "" {
+	if strings.TrimSpace(cfg.BadgerDir) == "" {
+		return mysql.Position{}, false, fmt.Errorf("position persistence: BadgerDir is empty")
+	}
+	var redisPos mysql.Position
+	var redisFound bool
+	if strings.TrimSpace(cfg.RedisAddr) != "" {
 		pos, _, err := ReadBinlogStateFromRedis(ctx, cfg)
 		if err == nil {
-			return pos, true, nil
-		}
-		if !errors.Is(err, ErrBinlogPositionNotFound) {
+			redisPos, redisFound = pos, true
+		} else if !errors.Is(err, ErrBinlogPositionNotFound) {
 			return mysql.Position{}, false, err
 		}
 	}
 	entries, err := os.ReadDir(cfg.BadgerDir)
 	if errors.Is(err, os.ErrNotExist) || (err == nil && len(entries) == 0) {
-		return mysql.Position{}, false, nil
+		return redisPos, redisFound, nil
 	}
 	if err != nil {
 		return mysql.Position{}, false, fmt.Errorf("inspect Badger position directory: %w", err)
 	}
 	pos, _, err := ReadBinlogStateFromBadger(cfg.BadgerDir, cfg.BadgerKey)
 	if err == nil {
+		if redisFound && compareBinlogPositions(redisPos, pos) >= 0 {
+			return redisPos, true, nil
+		}
 		return pos, true, nil
 	}
 	if errors.Is(err, ErrBinlogPositionNotFound) {
-		return mysql.Position{}, false, nil
+		return redisPos, redisFound, nil
 	}
 	return mysql.Position{}, false, err
+}
+
+func compareBinlogPositions(a, b mysql.Position) int {
+	if a.Name == b.Name {
+		switch {
+		case a.Pos < b.Pos:
+			return -1
+		case a.Pos > b.Pos:
+			return 1
+		default:
+			return 0
+		}
+	}
+	aPrefix, aSequence, aOK := binlogSequence(a.Name)
+	bPrefix, bSequence, bOK := binlogSequence(b.Name)
+	if aOK && bOK && aPrefix == bPrefix {
+		switch {
+		case aSequence < bSequence:
+			return -1
+		case aSequence > bSequence:
+			return 1
+		}
+	}
+	// Redis is the cross-instance checkpoint. Prefer it when file names cannot
+	// be ordered safely (for example after a source migration or naming change).
+	return 1
+}
+
+func binlogSequence(name string) (string, uint64, bool) {
+	i := len(name)
+	for i > 0 && name[i-1] >= '0' && name[i-1] <= '9' {
+		i--
+	}
+	if i == len(name) {
+		return "", 0, false
+	}
+	sequence, err := strconv.ParseUint(name[i:], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return name[:i], sequence, true
 }

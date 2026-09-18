@@ -1,6 +1,7 @@
 package tubing_cdc
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -59,7 +60,9 @@ func JoinElasticsearchDocumentID(separator string, parts ...ElasticsearchDocumen
 	}
 	return func(tableKey, action string, payloadJSON []byte) (string, bool) {
 		var root any
-		if err := json.Unmarshal(payloadJSON, &root); err != nil {
+		decoder := json.NewDecoder(bytes.NewReader(payloadJSON))
+		decoder.UseNumber()
+		if err := decoder.Decode(&root); err != nil {
 			return "", false
 		}
 		var b strings.Builder

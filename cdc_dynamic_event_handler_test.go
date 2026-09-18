@@ -107,6 +107,23 @@ func TestDynamicTableEventHandler_OnRow_pipelineErrorPolicies(t *testing.T) {
 	}
 }
 
+func TestDynamicTableEventHandler_OnRow_pipelineUsesConfiguredContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tbl := &schema.Table{Schema: "db", Name: "t", Columns: []schema.TableColumn{{Name: "id"}}}
+	h := NewDynamicTableEventHandler(nil,
+		WithRowEventSink(&sliceRowSink{}),
+		WithPipelineContext(ctx),
+		WithPipeline(MapE(func(ctx context.Context, event Event) (Event, error) {
+			return event, ctx.Err()
+		})),
+	)
+	err := h.OnRow(&canal.RowsEvent{Table: tbl, Action: canal.InsertAction, Rows: [][]interface{}{{1}}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("pipeline error = %v, want context.Canceled", err)
+	}
+}
+
 func TestSnakeToExportedGoName(t *testing.T) {
 	tests := []struct {
 		name string
@@ -661,5 +678,36 @@ func TestDynamicTableEventHandler_OnRow_envelope(t *testing.T) {
 				t.Fatalf("payload %s", env.Payload)
 			}
 		})
+	}
+}
+
+func TestDynamicTableEventHandler_EnvelopeCoordinates(t *testing.T) {
+	tbl := &schema.Table{Schema: "db", Name: "t", Columns: []schema.TableColumn{{Name: "value"}}}
+	sink := &sliceRowSink{}
+	h := NewDynamicTableEventHandler(nil, WithRowEventSink(sink), WithDBLogEnvelope(true), WithEventSourceID("source-a"))
+	if err := h.OnRotate(nil, &replication.RotateEvent{NextLogName: []byte("mysql-bin.000007")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.OnRow(&canal.RowsEvent{
+		Table: tbl, Action: canal.InsertAction, Header: &replication.EventHeader{LogPos: 900},
+		Rows: [][]interface{}{{"same"}, {"same"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.rows) != 2 {
+		t.Fatalf("rows = %d", len(sink.rows))
+	}
+	var envelopes [2]CDCEventEnvelope
+	for i, line := range sink.rows {
+		parts := strings.SplitN(line, "\t", 3)
+		if err := json.Unmarshal([]byte(parts[2]), &envelopes[i]); err != nil {
+			t.Fatal(err)
+		}
+		if envelopes[i].SourceID != "source-a" || envelopes[i].Position.File != "mysql-bin.000007" {
+			t.Fatalf("coordinates: %+v", envelopes[i])
+		}
+	}
+	if envelopes[0].EventID == envelopes[1].EventID || envelopes[1].RowOrdinal != 1 {
+		t.Fatalf("row ordinals must produce distinct ids: %+v", envelopes)
 	}
 }

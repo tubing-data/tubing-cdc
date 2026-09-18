@@ -210,6 +210,45 @@ func TestReadPersistedBinlogPosition_emptyDirectory(t *testing.T) {
 	}
 }
 
+func TestReadPersistedBinlogPosition_choosesNewestComparableCheckpoint(t *testing.T) {
+	mr := miniredis.RunT(t)
+	dir := t.TempDir()
+	store, err := newTwoTierPositionStore(&PositionPersistence{BadgerDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := mysql.Position{Name: "mysql-bin.000010", Pos: 50}
+	if err := store.onCommitted(local, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &PositionPersistence{BadgerDir: dir, RedisAddr: mr.Addr(), RedisKey: "position"}
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	stale, _ := json.Marshal(BinlogStateRecord{File: "mysql-bin.000009", Pos: 999})
+	if err := rdb.Set(context.Background(), cfg.RedisKey, stale, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := readPersistedBinlogPosition(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || got != local {
+		t.Fatalf("got %+v found=%v, want local %+v", got, found, local)
+	}
+}
+
+func TestCompareBinlogPositions(t *testing.T) {
+	if compareBinlogPositions(mysql.Position{Name: "mysql-bin.000002", Pos: 4}, mysql.Position{Name: "mysql-bin.000001", Pos: 999}) <= 0 {
+		t.Fatal("newer file must win")
+	}
+	if compareBinlogPositions(mysql.Position{Name: "mysql-bin.000002", Pos: 4}, mysql.Position{Name: "mysql-bin.000002", Pos: 5}) >= 0 {
+		t.Fatal("lower offset in same file must lose")
+	}
+}
+
 func TestReadBinlogStateFromBadger_errors(t *testing.T) {
 	tests := []struct {
 		name    string

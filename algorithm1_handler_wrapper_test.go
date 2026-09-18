@@ -148,19 +148,39 @@ func TestWrapHandlerWithAlgorithm1_nil_tracker(t *testing.T) {
 	}
 }
 
+func TestWrapHandlerWithAlgorithm1_propagatesMissingPK(t *testing.T) {
+	tracker := NewAlgorithm1Tracker()
+	if err := tracker.BeginCapture("app.users", "low", "high", []string{"missing_id"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.OnWatermark(WatermarkBinlogEvent{NewValue: "low"}); err != nil {
+		t.Fatal(err)
+	}
+	h := wrapHandlerWithAlgorithm1(&countingRowHandler{}, tracker, "app.users")
+	tbl := &schema.Table{Schema: "app", Name: "users", Columns: []schema.TableColumn{{Name: "id"}}}
+	err := h.OnRow(&canal.RowsEvent{Table: tbl, Action: canal.InsertAction, Rows: [][]interface{}{{int64(1)}}})
+	if err == nil {
+		t.Fatal("expected missing primary-key error")
+	}
+}
+
 func TestWrapHandlerWithAlgorithm1_dynamicTarget(t *testing.T) {
 	tracker := NewAlgorithm1Tracker()
 	if err := tracker.BeginCapture("app.users", "low", "high", []string{"id"}); err != nil {
 		t.Fatal(err)
 	}
-	tracker.OnWatermark(WatermarkBinlogEvent{NewValue: "low"})
+	if err := tracker.OnWatermark(WatermarkBinlogEvent{NewValue: "low"}); err != nil {
+		t.Fatal(err)
+	}
 	inner := &countingRowHandler{}
 	h := wrapHandlerWithAlgorithm1(inner, tracker, "")
 	tbl := &schema.Table{Schema: "app", Name: "users", Columns: []schema.TableColumn{{Name: "id"}}}
 	if err := h.OnRow(&canal.RowsEvent{Table: tbl, Action: canal.InsertAction, Rows: [][]interface{}{{int64(7)}}}); err != nil {
 		t.Fatal(err)
 	}
-	tracker.OnWatermark(WatermarkBinlogEvent{NewValue: "high"})
+	if err := tracker.OnWatermark(WatermarkBinlogEvent{NewValue: "high"}); err != nil {
+		t.Fatal(err)
+	}
 	out, err := tracker.ReconcileChunkRows([]map[string]any{{"id": int64(7)}, {"id": int64(8)}})
 	if err != nil {
 		t.Fatal(err)

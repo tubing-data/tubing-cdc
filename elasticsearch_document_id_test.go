@@ -139,6 +139,17 @@ func TestJoinElasticsearchDocumentID_singleLiteralEmptyYieldsFalse(t *testing.T)
 	}
 }
 
+func TestJoinElasticsearchDocumentID_preservesLargeInteger(t *testing.T) {
+	fn, err := JoinElasticsearchDocumentID(":", ElasticsearchDocumentIDField("id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, ok := fn("db.t", "insert", []byte(`{"id":9007199254740993}`))
+	if !ok || id != "9007199254740993" {
+		t.Fatalf("id=%q ok=%v", id, ok)
+	}
+}
+
 func TestElasticsearchSink_JoinDocumentID_emit(t *testing.T) {
 	docID, err := JoinElasticsearchDocumentID(":",
 		ElasticsearchDocumentIDLiteral("v1"),

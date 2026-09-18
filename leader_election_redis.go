@@ -22,12 +22,12 @@ type redisLeaderSession struct {
 	token  string
 	lease  time.Duration
 
-	lost       chan struct{}
-	lostOnce   sync.Once
-	closeOnce  sync.Once
-	stopRenew  context.CancelFunc
-	mu         sync.Mutex
-	released   bool
+	lost      chan struct{}
+	lostOnce  sync.Once
+	closeOnce sync.Once
+	stopRenew context.CancelFunc
+	mu        sync.Mutex
+	released  bool
 }
 
 func (s *redisLeaderSession) Lost() <-chan struct{} {
@@ -63,6 +63,9 @@ func (s *redisLeaderSession) closeClient() {
 
 // AcquireRedisLeaderSession blocks until this instance holds the Redis lease or ctx is cancelled.
 func AcquireRedisLeaderSession(ctx context.Context, cfg *LeaderElectionConfig) (LeaderSession, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("leader election: context is nil")
+	}
 	if cfg == nil {
 		return nil, fmt.Errorf("leader election: config is nil")
 	}

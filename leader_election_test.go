@@ -64,6 +64,22 @@ func TestRunTubingCDCWithLeaderElection_validation(t *testing.T) {
 			wantSub: "Lease must be at least 3s",
 		},
 		{
+			name: "renew interval must precede expiry",
+			cfg: &Configs{
+				Address: "x", Username: "u", Password: "p", Tables: []string{"db.t"},
+				LeaderElection: &LeaderElectionConfig{RedisAddr: "127.0.0.1:6379", Lease: 5 * time.Second, RenewInterval: 5 * time.Second},
+			},
+			wantSub: "RenewInterval",
+		},
+		{
+			name: "negative renew interval",
+			cfg: &Configs{
+				Address: "x", Username: "u", Password: "p", Tables: []string{"db.t"},
+				LeaderElection: &LeaderElectionConfig{RedisAddr: "127.0.0.1:6379", Lease: 5 * time.Second, RenewInterval: -time.Second},
+			},
+			wantSub: "RenewInterval",
+		},
+		{
 			name: "missing failover checkpoint",
 			cfg: &Configs{
 				Address: "x", Username: "u", Password: "p", Tables: []string{"db.t"},
@@ -221,5 +237,14 @@ func TestAcquireRedisLeaderSession_nilConfig(t *testing.T) {
 	_, err := AcquireRedisLeaderSession(context.Background(), nil)
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestAcquireRedisLeaderSession_nilContext(t *testing.T) {
+	t.Parallel()
+	//nolint:staticcheck // The nil context is the behavior under test.
+	_, err := AcquireRedisLeaderSession(nil, &LeaderElectionConfig{RedisAddr: "127.0.0.1:6379", Lease: 5 * time.Second})
+	if err == nil || !strings.Contains(err.Error(), "context is nil") {
+		t.Fatalf("got %v", err)
 	}
 }

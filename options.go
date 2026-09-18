@@ -31,6 +31,14 @@ type Configs struct {
 	Address  string
 	Username string
 	Password string
+	// SourceID is a stable identifier for this replication source. It is included in
+	// event envelopes and event-id generation. Empty defaults to Address.
+	SourceID string
+	// ServerID is the MySQL replication client id. Zero generates a cryptographically
+	// random non-zero value. Set it explicitly when deployments need stable allocation.
+	ServerID uint32
+	// BinlogReadTimeout configures the go-mysql replication stream read timeout.
+	BinlogReadTimeout time.Duration
 	// Tables lists fully-qualified names as "database.table" for canal IncludeTableRegex.
 	Tables []string
 	// EventHandler is optional; when nil, MyEventHandler is used.
@@ -103,6 +111,11 @@ func (c *FullSyncConfig) validate(cfg *Configs) error {
 	}
 	if len(c.Tables) == 0 {
 		return fmt.Errorf("full-sync: no tables configured")
+	}
+	switch c.ErrorPolicy {
+	case Algorithm1DriverStopOnError, Algorithm1DriverContinueOnError:
+	default:
+		return fmt.Errorf("full-sync: invalid ErrorPolicy %d", c.ErrorPolicy)
 	}
 	seen := make(map[string]struct{}, len(c.Tables))
 	replicated := make(map[string]struct{}, len(cfg.Tables))
